@@ -55,4 +55,5 @@
                #:port 8080
                #:servlet-regexp #rx""
                #:log-file "./soc.log"
-               #:servlet-path "")
+               #:servlet-path ""
+	       #:launch-browser #f)
