@@ -3,7 +3,8 @@
 (require web-server/http
          web-server/managers/none
          json
-         web-server/servlet-env)
+         web-server/servlet-env
+         "webfinger.rkt")
 (provide interface-version manager start)
  
 (define interface-version 'v2)
@@ -49,14 +50,6 @@
           (td "Bindings: ")
           (td ,@(render-bindings req)))))))))
 
-(define (webfinger req)
-  (let ((resource (extract-binding/single 'resource (request-bindings req))))
-    (get-resource resource)))
-
-(define (get-resource res)
-  (response/jsexpr
-   (hash 'subject res
-         'aliases (list "milway.ca/thrilway" ))))
 
 (serve/servlet start
                #:port 8080
