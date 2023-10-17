@@ -20,7 +20,25 @@
 (define-values (soc-dispatch soc-urls)
   (dispatch-rules
    (("") home)
-   ((".well-known" "webfinger") webfinger)))
+   ((".well-known" "webfinger") webfinger)
+   (("user" (string-arg)) #:method "get" user)
+   (("user" (string-arg) "outbox") #:method "post" user-outbox-post)
+   (("user" (string-arg) "outbox") #:method "get" user-outbox-get)
+   (("user" (string-arg) "inbox") #:method "post" user-inbox-post)
+   (("user" (string-arg) "inbox") #:method "get" user-inbox-get)
+   (("user" (string-arg) (integer-arg)) #:method "get" review-get)
+   (("podcast" (integer-arg)) #:method get podcast-get)
+   (("episode" (integer-arg)) #:method get episode-get)
+   ))
+
+(define (user-outbox-post req user)
+  (define (authorized? req) #t)
+  (if (authorized? req)
+      (let ((data ((bytes->jsexpr (request-post-data/raw)))
+            (id-num ()
+        (cond ((AS-Object? data)
+               (let ((create (make-hash))
+               ))))
 
 (define (home req)
   (define (render-headers req)
@@ -56,4 +74,4 @@
                #:servlet-regexp #rx""
                #:log-file "./soc.log"
                #:servlet-path ""
-	       #:launch-browser #f)
+	       #:launch-browser? #f)
