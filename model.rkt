@@ -6,6 +6,7 @@
 (struct pod (db))
 (struct pod-user (pod id))
 (struct pod-podcast (pod id))
+(struct pod-episode (pod id))
 
 (define (init-pod! database user #:password (password #f) #:socket (socket 'guess))
   (define db (postgresql-connect
@@ -49,6 +50,28 @@
                     "description text, "
                     "date_published timestamp, "
                     "podcast_id integer REFERENCES podcasts (id))")))
+    (unless (table-exists? db "tags")
+      (query-exec db
+                  (string-append
+                   "CREATE TABLE tags "
+                   "(id serial PRIMARY KEY, "
+                   "tag_term text NOT NULL)"
+                   )))
+    (unless (table-exists? db "podcast_tags")
+      (query-exec db
+                  (string-append
+                   "CREATE TABLE podcast_tags "
+                   "(id serial PRIMARY KEY, "
+                   "podcast_id integer REFERENCES podcasts (id), "
+                   "tag_id integer REFERENCES tags (id))")))
+    (unless (table-exists? db "episode_tags")
+      (query-exec db
+                  (string-append
+                   "CREATE TABLE episode_tags "
+                   "(id serial PRIMARY KEY, "
+                   "episode_id integer REFERENCES episodes (id), "
+                   "tag_id integer REFERENCES tags (id))")))
+    
     (pod-insert-podcast! the-pod
                                  "https://feeds.acast.com/public/shows/thesloppyboys")
     (pod-insert-podcast! the-pod
@@ -186,27 +209,72 @@
                         (hash-ref cast-info 'title)
                         (hash-ref cast-info 'description)
                         (hash-ref cast-info 'cover_art)))))
+      (insert-podcast-tags! the-podcast (hash-ref cast-info 'tags))
       (insert-pod-episodes! the-podcast (hash-ref cast-info 'episodes)))))
+
+(define (insert-podcast-tags! a-podcast tags)
+  (let loop ((rem tags))
+    (if (null? rem)
+        (void)
+        (begin
+          (let ((tag_id (or
+                         (query-maybe-value
+                          (pod-db (pod-podcast-pod a-podcast))
+                          "SELECT id FROM tags WHERE tag_term = $1"
+                          (car rem))
+                         (query-value
+                          (pod-db (pod-podcast-pod a-podcast))
+                          "INSERT INTO tags (tag_term) VALUES ($1) RETURNING id"
+                          (car rem)))))
+            (query-exec
+             (pod-db (pod-podcast-pod a-podcast))
+             "INSERT INTO podcast_tags (tag_id, podcast_id) VALUES ($1, $2)"
+             tag_id (pod-podcast-id a-podcast)))
+          (loop (cdr rem))))))                
 
 (define (insert-pod-episode! a-podcast ep)
   (define (date-str->sql-timestamp date-str)
     (query-value (pod-db (pod-podcast-pod a-podcast))
                  "[SELECT timestamp with time zone $1]"
                  date-str))
-  (query-exec (pod-db (pod-podcast-pod a-podcast))
-              (string-append
-               "INSERT INTO episodes "
-               "(file_url, title, description, date_published, podcast_id) "
-               "VALUES ($1, $2, $3, $4, $5)")
-              (hash-ref ep 'file_url)
-              (hash-ref ep 'title)
-              (hash-ref ep 'description)
-              (query-value (pod-db (pod-podcast-pod a-podcast))
-                           (format "SELECT timestamp with time zone '~a'" (hash-ref ep 'date_published)))
-              (pod-podcast-id a-podcast)))
+  (let ((the-ep (pod-episode (pod-podcast-pod a-podcast)
+                         (query-value (pod-db (pod-podcast-pod a-podcast))
+                                      (string-append
+                                       "INSERT INTO episodes "
+                                       "(file_url, title, description, date_published, podcast_id) "
+                                       "VALUES ($1, $2, $3, $4, $5) "
+                                       "RETURNING id")
+                                      (hash-ref ep 'file_url)
+                                      (hash-ref ep 'title)
+                                      (hash-ref ep 'description)
+                                      (query-value (pod-db (pod-podcast-pod a-podcast))
+                                                   (format "SELECT timestamp with time zone '~a'" (hash-ref ep 'date_published)))
+                                      (pod-podcast-id a-podcast)))))
+    (insert-episode-tags! the-ep (hash-ref ep 'tags))))
+
 (define (insert-pod-episodes! a-podcast eps)
   (for ((ep eps))
     (insert-pod-episode! a-podcast ep)))
+
+(define (insert-episode-tags! an-episode tags)
+  (let loop ((rem tags))
+    (if (null? rem)
+        (void)
+        (begin
+          (let ((tag_id (or
+                         (query-maybe-value
+                          (pod-db (pod-episode-pod an-episode))
+                          "SELECT id FROM tags WHERE tag_term = $1"
+                          (car rem))
+                         (query-value
+                          (pod-db (pod-episode-pod an-episode))
+                          "INSERT INTO tags (tag_term) VALUES ($1) RETURNING id"
+                          (car rem)))))
+            (query-exec
+             (pod-db (pod-episode-pod an-episode))
+             "INSERT INTO podcast_tags (tag_id, podcast_id) VALUES ($1, $2)"
+             tag_id (pod-episode-id an-episode)))
+          (loop (cdr rem))))))
 
 (define (pod-insert-subscription! a-pod a-user a-podcast)
   (query-exec (pod-db a-pod)
