@@ -31,21 +31,23 @@
   (define user (getenv-or-false "DB_USER"))
   (define pass (getenv-or-false "DB_PASSWORD"))
   (define database (getenv-or-false "DB_DATABASE"))
-  (define port/number (string->number port
-                                      10
-                                      'number-or-false))
-  (unless (integer? port/number)
-    (error "Port cannot be understood as an integer:"
-           port))
-  (unless (> port/number 0)
-    (error "Port should be positive:" port/number))
-  (postgresql-data-source
-   #:user user
-   #:port (if (integer? port/number) port/number #f)
-   #:server (if host host "localhost")
-   #:password (if pass pass #f)
-   #:database database
-   #:socket (if pass #f 'guess)))
+  (define port/number (if (string? port)
+			(string->number port
+					10
+					'number-or-false)
+			#f))
+  (if port
+    (postgresql-data-source
+      #:user user
+      #:port port/number
+      #:server host
+      #:password pass 
+      #:database database)
+    (postgresql-data-source
+      #:user user
+      #:database database
+      #:socket 'guess)))
+
 (define db-source (load-db))
 (define (connect!)
   (dsn-connect db-source))

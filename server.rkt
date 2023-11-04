@@ -35,9 +35,11 @@
        (body
         (form
          ((action
-           ,(embed/url opml-upload-handler)))
+           ,(embed/url opml-upload-handler))
+	   (method "POST")
+	   (enctype "multipart/form-data"))
          ,@(formlet-display opml-import-formlet)
-         (input ((type "submit"))))))))
+	 (input ((type "submit"))))))))
   (define (opml-upload-handler req)
     (begin
       (process-opml a-pod (formlet-process opml-import-formlet req))
