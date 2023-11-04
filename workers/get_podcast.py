@@ -18,6 +18,10 @@ def episode_info(entry):
     out["date_published"] = entry.published
     out["file_url"] = get_episode_url()
     out["duration"] = entry.itunes_duration
+    if entry.has_key("tags"):
+        out["tags"] = [t["term"] for t in entry.tags]
+    else:
+        out["tags"] = []
     return out
 
 def episodes_info(entries):
@@ -31,6 +35,10 @@ def podcast_info(feed):
     out["title"] = feed.title
     out["description"] = feed.description
     out["cover_art_url"] = feed.image.href
+    if feed.has_key("tags"):
+        out["tags"] = [t["term"] for t in feed.tags]
+    else:
+        out["tags"] = []
     return out
 
 if __name__ == "__main__":

@@ -1,18 +1,59 @@
 #lang racket/base
 (require db
          "workers.rkt"
-         racket/match)
+         racket/match
+         dotenv)
 
 (struct pod (db))
 (struct pod-user (pod id))
 (struct pod-podcast (pod id))
 (struct pod-episode (pod id))
 
-(define (init-pod! database user #:password (password #f) #:socket (socket 'guess))
-  (define db (postgresql-connect
-              #:user user
-              #:database database
-              #:socket 'guess))
+(define (getenv-or-die var)
+  (unless (string? var)
+    (error "Variable should be a string:" var))
+  (define val (getenv var))
+  (unless (string? val)
+    (error (format "Mandatory environment variable \"~a\" is unset." var)))
+  val)
+(define (getenv-or-false var)
+  (unless (string? var)
+    (error "Variable should be a string:" var))
+  (let ((val (getenv var)))
+    (if (string? val)
+        val
+        #f)))
+
+(define (load-db)
+  (dotenv-load! (list ".env"))
+  (define host (getenv-or-false "DB_HOST"))
+  ;(define port (getenv-or-false "DB_PORT"))
+  (define user (getenv-or-false "DB_USER"))
+  ;(define pass (getenv-or-false "DB_PASSWORD"))
+  (define database (getenv-or-false "DB_DATABASE"))
+  ;(define port/number (string->number port
+  ;                                    10
+  ;                                    'number-or-false))
+  ;(unless (integer? port/number)
+  ;  (error "Port cannot be understood as an integer:"
+  ;         port))
+  ;(unless (> port/number 0)
+  ;  (error "Port should be positive:" port/number))
+  (postgresql-data-source
+   #:user user
+   ;#:port port/number
+   ;#:server (if host host "localhost")
+   ;#:password (if pass pass #f)
+   #:database database
+   #:socket 'guess))
+(define db-source (load-db))
+(define (connect!)
+  (dsn-connect db-source))
+
+(define (init-pod!)
+  (define db
+    (virtual-connection
+     (connection-pool connect!)))
   (define the-pod (pod db))
   (unless (table-exists? db "users")
     (query-exec db
@@ -124,6 +165,14 @@
     (pod-insert-follow! the-pod
                         (pod-user the-pod 2)
                         (pod-user the-pod 1)))
+  (unless (table-exists? db "user_podcast_reviews")
+    (query-exec db
+                (string-append
+                 "CREATE TABLE user_podcast_reviews ("
+                 "id serial PRIMARY KEY, "
+                 "user_id integer REFERENCES users (id) ON DELETE CASCADE, "
+                 "podcast_id integer REFERENCES podcasts (id) ON DELETE CASCADE, "
+                 "rating smallint, review text)")))
   the-pod)
 
 (define (clear-pod! database user #:password (password #f) #:socket (socket 'guess))
@@ -193,7 +242,7 @@
           out
           (hash-set out (string->symbol (cdr (assv 'name head))) val)))))
                
-(define (pod-insert-podcast! a-pod feed_url)
+(define (pod-insert-podcast! a-pod feed_url (a-user '()))
   (let ((cast-info (get-podcast-info feed_url)))
     (let ((the-podcast
            (pod-podcast
@@ -209,8 +258,10 @@
                         (hash-ref cast-info 'title)
                         (hash-ref cast-info 'description)
                         (hash-ref cast-info 'cover_art)))))
-      (insert-podcast-tags! the-podcast (hash-ref cast-info 'tags))
-      (insert-pod-episodes! the-podcast (hash-ref cast-info 'episodes)))))
+      (when a-user
+        (pod-insert-subscription! a-pod a-user the-podcast))
+      (thread (insert-podcast-tags! the-podcast (hash-ref cast-info 'tags)))
+      (thread (insert-pod-episodes! the-podcast (hash-ref cast-info 'episodes))))))
 
 (define (insert-podcast-tags! a-podcast tags)
   (let loop ((rem tags))
@@ -313,6 +364,9 @@
               (if (pod-user-manually-approves-follows? a-user2)
                   #f
                   #t)))
+(define the-pod (init-pod!))
+
+(provide pod pod-db the-pod pod-insert-podcast!)
 
 (define clear
     (lambda () (clear-pod! "dolphin_pod" "dan")))

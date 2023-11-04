@@ -2,7 +2,8 @@
 (require json
          net/url
          racket/port
-         racket/string)
+         racket/string
+         racket/file)
 
 (define (get-podcast-info feed-url)
   (define (fetch-image url-string)
@@ -21,6 +22,18 @@
         (append out
                 (list
                  (hash-set h 'duration (time-str->secs (hash-ref h 'duration)))))))))
-    
-(provide get-podcast-info)
 
+(define (import-opml opml-file)
+  (let ((temp-file-name (make-temporary-file)))
+    (begin
+      (call-with-output-file temp-file-name
+        (lambda (out)
+          (write-bytes opml-file out))
+        #:exists 'replace)
+      (let-values (((sp out in err) (subprocess #f #f #f "./workers/import_opml.py" temp-file-name)))
+        (let ((js (read-json out)))
+          (begin
+            (delete-file temp-file-name)
+            js))))))
+    
+(provide get-podcast-info import-opml)

@@ -1,77 +1,72 @@
-#lang web-server
+#lang racket
 
-(require web-server/http
-         web-server/managers/none
+(require web-server/servlet
+         web-server/formlets
          json
-         web-server/servlet-env
-         "webfinger.rkt")
-(provide interface-version manager start)
- 
-(define interface-version 'v2)
-(define manager
-  (create-none-manager
-   (lambda (req)
-     (response/xexpr
-      `(html (head (title "No Continuations Here!"))
-             (body (h1 "No Continuations Here!")))))))
+         ;"webfinger.rkt"
+         "model.rkt"
+         "workers.rkt")
+
+(provide/contract (start (request? . -> . response?)))
+
 (define (start req)
-  (soc-dispatch req))
+  (render-dolphin-pod the-pod req))
 
-(define-values (soc-dispatch soc-urls)
-  (dispatch-rules
-   (("") home)
-   ((".well-known" "webfinger") webfinger)
-   (("user" (string-arg)) #:method "get" user)
-   (("user" (string-arg) "outbox") #:method "post" user-outbox-post)
-   (("user" (string-arg) "outbox") #:method "get" user-outbox-get)
-   (("user" (string-arg) "inbox") #:method "post" user-inbox-post)
-   (("user" (string-arg) "inbox") #:method "get" user-inbox-get)
-   (("user" (string-arg) (integer-arg)) #:method "get" review-get)
-   (("podcast" (integer-arg)) #:method get podcast-get)
-   (("episode" (integer-arg)) #:method get episode-get)
-   ))
-
-(define (user-outbox-post req user)
-  (define (authorized? req) #t)
-  (if (authorized? req)
-      (let ((data ((bytes->jsexpr (request-post-data/raw)))
-            (id-num ()
-        (cond ((AS-Object? data)
-               (let ((create (make-hash))
-               ))))
-
-(define (home req)
-  (define (render-headers req)
-    (for/fold ((out '())
-               #:result out)
-              ((header (request-headers req)))
-      (append out (list `(div ,(string-append (symbol->string (car header)) ": " (cdr header)))))))
-  (define (render-bindings req)
-    (for/fold ((out '())
-               #:result out)
-              ((binding (request-bindings req)))
-      (append out (list `(div ,(string-append (symbol->string (car binding)) ": " (cdr binding)))))))
-  (begin
-    (display req)
+(define (render-dolphin-pod a-pod request)
+  (define (response-generator embed/url)
     (response/xexpr
      `(html
-       (head (title "Soc"))
+       (head
+        (title "Dolphin Pod: a social podcatcher"))
        (body
-        (table
-         (tr ((valign "top"))
-          (td "URI: ")
-          (td ,(url->string (request-uri req))))
-         (tr ((valign "top"))
-          (td "Headers: ")
-          (td ,@(render-headers req)))
-         (tr ((valign "top"))
-          (td "Bindings: ")
-          (td ,@(render-bindings req)))))))))
+        (h3 "Currently available functions:")
+        (ul
+         (li (a ((href ,(embed/url opml-import-page-handler))) "Import an OPML file")))))))
+  (define (opml-import-page-handler req)
+    (render-opml-import-page a-pod req))
+  (send/suspend/dispatch response-generator))
 
+(define (render-opml-import-page a-pod req)
+  (define (response-generator embed/url)
+    (response/xexpr
+     `(html
+       (head
+        (title "Import and OPML file"))
+       (body
+        (form
+         ((action
+           ,(embed/url opml-upload-handler)))
+         ,@(formlet-display opml-import-formlet)
+         (input ((type "submit"))))))))
+  (define (opml-upload-handler req)
+    (begin
+      (process-opml a-pod (formlet-process opml-import-formlet req))
+      (render-dolphin-pod a-pod (redirect/get))))
+  (send/suspend/dispatch response-generator))
+  
+(define opml-import-formlet
+  (formlet
+   (#%#
+    ,((file-upload #:attributes (list (list 'accept "text/x-opml"))) . => . opml-file))
+   opml-file))
 
+(define (process-opml a-pod a-file)
+  (let loop ((rem (import-opml a-file)))
+    (if (null? rem)
+        (void)
+        (begin
+          (thread
+           (lambda () (pod-insert-podcast! a-pod (hash-ref (car rem) 'feedUrl))))
+          (loop (cdr rem))))))
+        
+(require web-server/servlet-env)
 (serve/servlet start
+               #:launch-browser? #f
+               #:quit? #f
+               #:listen-ip #f
                #:port 8080
+               #:extra-files-paths
+               (list (build-path (current-directory) "htdocs"))
                #:servlet-regexp #rx""
                #:log-file "./soc.log"
-               #:servlet-path ""
-	       #:launch-browser? #f)
+               #:servlet-path "")
