@@ -1,22 +1,25 @@
 #lang racket/base
-(require db
-         "workers.rkt"
-         racket/match
-         dotenv)
+(require
+  racket/contract
+  db
+  db/util/datetime  
+  net/url
+  "workers.rkt"
+  racket/match
+  racket/date
+  dotenv)
 
-(struct pod (db))
-(struct pod-user (pod id))
-(struct pod-podcast (pod id))
-(struct pod-episode (pod id))
 
-(define (getenv-or-die var)
+(define/contract (getenv-or-die var)
+  (-> string? string?)
   (unless (string? var)
     (error "Variable should be a string:" var))
   (define val (getenv var))
   (unless (string? val)
     (error (format "Mandatory environment variable \"~a\" is unset." var)))
   val)
-(define (getenv-or-false var)
+(define/contract (getenv-or-false var)
+  (-> string? (or/c string? #f))
   (unless (string? var)
     (error "Variable should be a string:" var))
   (let ((val (getenv var)))
@@ -24,7 +27,8 @@
         val
         #f)))
 
-(define (load-db)
+(define/contract (load-db)
+  (-> data-source?)
   (dotenv-load! (list ".env"))
   (define host (getenv-or-false "DB_HOST"))
   (define port (getenv-or-false "DB_PORT"))
@@ -49,328 +53,659 @@
       #:socket 'guess)))
 
 (define db-source (load-db))
-(define (connect!)
+(define/contract (connect!)
+  (-> connection?)
   (dsn-connect db-source))
-
-(define (init-pod!)
+;Structs
+(struct/contract pod ((db connection?)))
+(struct/contract pod-tag ((pod pod?) (id integer?)))
+(struct/contract pod-podcast ((pod pod?) (id number?)))
+(struct/contract pod-author ((pod pod?) (id integer?)))
+(struct/contract pod-episode ((pod pod?) (id integer?)))
+(struct/contract pod-user ((pod pod?) (id number?)))
+(struct/contract pod-profile ((pod pod?) (id number?)))
+(struct/contract pod-review ((pod pod?) (id number?)))
+(struct/contract pod-comment ((pod pod?) (id integer?)))
+;The Pod
+(define/contract (init-pod!)
+  (-> pod?)
   (define db
     (virtual-connection
      (connection-pool connect!)))
   (define the-pod (pod db))
-  (unless (table-exists? db "users")
-    (query-exec db
-                (string-append
-                 "CREATE TABLE users "
-                 "(id serial NOT NULL, username varchar(50) NOT NULL UNIQUE, "
-                 "email text NOT NULL UNIQUE, password text NOT NULL, "
-                 "icon bytea, name text, "
-                 "manually_approves_follows boolean DEFAULT TRUE, "
-                 "date_created timestamp (0) DEFAULT CURRENT_DATE, "
-                 "CONSTRAINT user_key PRIMARY KEY (id)"
-                 ")"))
-    (pod-insert-user! the-pod
-                              "jhill"
-                              "joe.hill@iww.ca"
-                              "APassword1")
-    (pod-insert-user! the-pod
-                              "emma.goldman"
-                              "e@riseup.ca"
-                              "Anarchy4Eva")
-    (pod-update-user! (pod-user the-pod 2) (list (cons 'manually_approves_follows #f))))
-  (unless (table-exists? db "podcasts")
-    (query-exec db
-                (string-append
-                 "CREATE TABLE podcasts "
-                 "(id serial NOT NULL, feed_url text NOT NULL UNIQUE, title text, description text, cover_art bytea, "
-                 "CONSTRAINT podcast_key PRIMARY KEY (id))"))
-     (unless (table-exists? db "episodes")
-       (query-exec db
-                   (string-append
-                    "CREATE TABLE episodes "
-                    "(id serial PRIMARY KEY, "
-                    "file_url text NOT NULL, "
-                    "title text NOT NULL, "
-                    "description text, "
-                    "date_published timestamp, "
-                    "podcast_id integer REFERENCES podcasts (id))")))
-    (unless (table-exists? db "tags")
-      (query-exec db
-                  (string-append
-                   "CREATE TABLE tags "
-                   "(id serial PRIMARY KEY, "
-                   "tag_term text NOT NULL)"
-                   )))
-    (unless (table-exists? db "podcast_tags")
-      (query-exec db
-                  (string-append
-                   "CREATE TABLE podcast_tags "
-                   "(id serial PRIMARY KEY, "
-                   "podcast_id integer REFERENCES podcasts (id), "
-                   "tag_id integer REFERENCES tags (id))")))
-    (unless (table-exists? db "episode_tags")
-      (query-exec db
-                  (string-append
-                   "CREATE TABLE episode_tags "
-                   "(id serial PRIMARY KEY, "
-                   "episode_id integer REFERENCES episodes (id), "
-                   "tag_id integer REFERENCES tags (id))")))
-    
-    (pod-insert-podcast! the-pod
-                                 "https://feeds.acast.com/public/shows/thesloppyboys")
-    (pod-insert-podcast! the-pod
-                                 "https://feeds.redcircle.com/c77fa711-6942-4cc5-a864-93521650ac95")
-    (pod-insert-podcast! the-pod
-                                 "https://itsgoingdown.org/category/podcast/feed"))
-  (unless (table-exists? db "subscriptions")
-    (query-exec db
-                (string-append
-                 "CREATE TABLE subscriptions "
-                 "(id serial PRIMARY KEY, "
-                 "user_id integer REFERENCES users (id) ON DELETE CASCADE, "
-                 "podcast_id integer REFERENCES podcasts (id) ON DELETE CASCADE, "
-                 "subscription_date timestamp (0) DEFAULT CURRENT_DATE"
-                 ")"))
-    (pod-insert-subscription! the-pod
-                                      (pod-user the-pod 1)
-                                      (pod-podcast the-pod 1))
-    (pod-insert-subscription! the-pod
-                                      (pod-user the-pod 1)
-                                      (pod-podcast the-pod 2))
-    (pod-insert-subscription! the-pod
-                                      (pod-user the-pod 2)
-                                      (pod-podcast the-pod 1))
-    (pod-insert-subscription! the-pod
-                                      (pod-user the-pod 2)
-                                      (pod-podcast the-pod 3)))
-  (unless (table-exists? db "users_episodes_rels")
-    (query-exec db
-                (string-append
-                 "CREATE TABLE users_episodes_rels ("
-                 "id serial PRIMARY KEY, "
-                 "user_id integer NOT NULL REFERENCES users (id) ON DELETE CASCADE, "
-                 "episode_id integer NOT NULL REFERENCES episodes (id) ON DELETE CASCADE, "
-                 "seconds_listented integer DEFAULT 0, "
-                 "episode_played BOOLEAN DEFAULT FALSE)")))
-  (unless (table-exists? db "follows")
-    (query-exec db
-                (string-append
-                 "CREATE TABLE follows ("
-                 "id serial PRIMARY KEY, "
-                 "follower_id integer NOT NULL REFERENCES users (id) ON DELETE CASCADE, "
-                 "followed_id integer NOT NULL REFERENCES users (id) ON DELETE CASCADE, "
-                 "follow_date timestamp (0) DEFAULT CURRENT_DATE, "
-                 "follow_accepted BOOLEAN"
-                 ")"))
-    (pod-insert-follow! the-pod
-                        (pod-user the-pod 1)
-                        (pod-user the-pod 2))
-    (pod-insert-follow! the-pod
-                        (pod-user the-pod 2)
-                        (pod-user the-pod 1)))
-  (unless (table-exists? db "user_podcast_reviews")
-    (query-exec db
-                (string-append
-                 "CREATE TABLE user_podcast_reviews ("
-                 "id serial PRIMARY KEY, "
-                 "user_id integer REFERENCES users (id) ON DELETE CASCADE, "
-                 "podcast_id integer REFERENCES podcasts (id) ON DELETE CASCADE, "
-                 "rating smallint, review text)")))
+  (unless (table-exists? (pod-db the-pod) "users")
+    (init-pod-users! the-pod))
+  (unless (table-exists? (pod-db the-pod) "podcasts")
+    (init-pod-podcasts! the-pod))
+  (unless (table-exists? (pod-db the-pod) "episodes")
+    (init-pod-episodes! the-pod))
+  (unless (table-exists? (pod-db the-pod) "tags")
+    (init-pod-tags! the-pod))
+  (unless (table-exists? (pod-db the-pod) "podcast_reviews")
+    (init-pod-reviews! the-pod))
+  (unless (table-exists? (pod-db the-pod) "comments")
+    (init-pod-comments! the-pod))
+  (unless (table-exists? (pod-db the-pod) "subscriptions")
+    (init-pod-subscriptions! the-pod))
+  (unless (table-exists? (pod-db the-pod) "profile_episode_rels")
+    (init-pod-profile-episode-rels! the-pod))
+  (unless (table-exists? (pod-db the-pod) "profile_entity_stars")
+    (init-pod-stars! the-pod))
+  (unless (table-exists? (pod-db the-pod) "profile_entity_shares")
+    (init-pod-shares! the-pod))
+  (unless (table-exists? (pod-db the-pod) "tag_entity_rels")
+    (init-pod-tag-entity-rels! the-pod))
   the-pod)
 
-(define (clear-pod! database user #:password (password #f) #:socket (socket 'guess))
-    (define db (postgresql-connect
-              #:user user
-              #:database database
-              #:socket 'guess))
-  (query-exec db
-              (string-append
-               "DROP TABLE IF EXISTS "
-               "users, "
-               "podcasts, "
-               "episodes "
-               "CASCADE")))
 
-(define (pod-users a-pod)
-  (define (id->user id)
-    (pod-user a-pod id))
-  (map id->user
-       (query-list (pod-db a-pod)
-                   "SELECT id FROM users")))
-
-(define (pod-insert-user! a-pod username email password)
+;(define/contract (clear-pod! database user #:password (password #f) #:socket (socket 'guess))
+;  (->* (connection? string?) (string? symbol?) void?)
+;    (define db (postgresql-connect
+;              #:user user
+;              #:database database
+;              #:socket 'guess))
+;  (query-exec db
+;              (string-append
+;               "DROP TABLE IF EXISTS "
+;               "users, "
+;               "podcasts, "
+;               "episodes "
+;               "CASCADE")))
+;Entities
+(define/contract (init-pod-entity-type! a-pod)
+  (-> pod? void?)
   (query-exec (pod-db a-pod)
               (string-append
-               "INSERT INTO users "
-               "(username, email, password) "
-               "VALUES "
-               "($1, $2, crypt($3, gen_salt('bf')))")
-              username email password))
-(define (pod-update-user! a-user bindings)
-  (for ((kv bindings))
-    (match kv
-      ((cons 'icon v) (pod-update-user-icon! a-user v))
-      ((cons 'manually_approves_follows v) (pod-update-user-maf! a-user v))
-      (else (void)))))
-  
-(define (pod-update-user-icon! a-user img)
-  (query-exec (pod-db (pod-user-pod a-user))
-              (string-append
-               "UPDATE users "
-               "SET icon = $2 "
-               "WHERE users.id = $1")
-              (pod-user-id a-user)
-              img))
-(define (pod-update-user-maf! a-user maf?)
-  (query-exec (pod-db (pod-user-pod a-user))
-              (string-append
-               "UPDATE users "
-               "SET manually_approves_follows = $2 "
-               "WHERE users.id = $1")
-              (pod-user-id a-user)
-              maf?))
-
-(define (pod-user-manually-approves-follows? a-user)
-  (query-value (pod-db (pod-user-pod a-user))
-               "SELECT manually_approves_follows FROM users WHERE id = $1"
-               (pod-user-id a-user)))
-(define (pod-select-user a-pod username)
-  (let ((res (query (pod-db a-pod)
-                    "SELECT * FROM users WHERE username = $1"
-                    username)))
-    (for/fold ((out (hash)) #:result out)
-              ((head (rows-result-headers res))
-               (val (in-vector (car (rows-result-rows res)))))
-      (if (string=? (cdr (assv 'name head)) "password")
-          out
-          (hash-set out (string->symbol (cdr (assv 'name head))) val)))))
-               
-(define (pod-insert-podcast! a-pod feed_url (a-user '()))
-  (let ((cast-info (get-podcast-info feed_url)))
-    (let ((the-podcast
-           (pod-podcast
-            a-pod
-            (query-value (pod-db a-pod)
-                        (string-append
-                         "INSERT INTO podcasts "
-                         "(feed_url, title, description, cover_art) "
-                         "VALUES "
-                         "($1, $2, $3, $4) "
-                         "RETURNING id")
-                        feed_url
-                        (hash-ref cast-info 'title)
-                        (hash-ref cast-info 'description)
-                        (hash-ref cast-info 'cover_art)))))
-      (when a-user
-        (pod-insert-subscription! a-pod a-user the-podcast))
-      (thread (insert-podcast-tags! the-podcast (hash-ref cast-info 'tags)))
-      (thread (insert-pod-episodes! the-podcast (hash-ref cast-info 'episodes))))))
-
-(define (insert-podcast-tags! a-podcast tags)
-  (let loop ((rem tags))
-    (if (null? rem)
-        (void)
-        (begin
-          (let ((tag_id (or
-                         (query-maybe-value
-                          (pod-db (pod-podcast-pod a-podcast))
-                          "SELECT id FROM tags WHERE tag_term = $1"
-                          (car rem))
-                         (query-value
-                          (pod-db (pod-podcast-pod a-podcast))
-                          "INSERT INTO tags (tag_term) VALUES ($1) RETURNING id"
-                          (car rem)))))
-            (query-exec
-             (pod-db (pod-podcast-pod a-podcast))
-             "INSERT INTO podcast_tags (tag_id, podcast_id) VALUES ($1, $2)"
-             tag_id (pod-podcast-id a-podcast)))
-          (loop (cdr rem))))))                
-
-(define (insert-pod-episode! a-podcast ep)
-  (define (date-str->sql-timestamp date-str)
-    (query-value (pod-db (pod-podcast-pod a-podcast))
-                 "[SELECT timestamp with time zone $1]"
-                 date-str))
-  (let ((the-ep (pod-episode (pod-podcast-pod a-podcast)
-                         (query-value (pod-db (pod-podcast-pod a-podcast))
-                                      (string-append
-                                       "INSERT INTO episodes "
-                                       "(file_url, title, description, date_published, podcast_id) "
-                                       "VALUES ($1, $2, $3, $4, $5) "
-                                       "RETURNING id")
-                                      (hash-ref ep 'file_url)
-                                      (hash-ref ep 'title)
-                                      (hash-ref ep 'description)
-                                      (query-value (pod-db (pod-podcast-pod a-podcast))
-                                                   (format "SELECT timestamp with time zone '~a'" (hash-ref ep 'date_published)))
-                                      (pod-podcast-id a-podcast)))))
-    (insert-episode-tags! the-ep (hash-ref ep 'tags))))
-
-(define (insert-pod-episodes! a-podcast eps)
-  (for ((ep eps))
-    (insert-pod-episode! a-podcast ep)))
-
-(define (insert-episode-tags! an-episode tags)
-  (let loop ((rem tags))
-    (if (null? rem)
-        (void)
-        (begin
-          (let ((tag_id (or
-                         (query-maybe-value
-                          (pod-db (pod-episode-pod an-episode))
-                          "SELECT id FROM tags WHERE tag_term = $1"
-                          (car rem))
-                         (query-value
-                          (pod-db (pod-episode-pod an-episode))
-                          "INSERT INTO tags (tag_term) VALUES ($1) RETURNING id"
-                          (car rem)))))
-            (query-exec
-             (pod-db (pod-episode-pod an-episode))
-             "INSERT INTO podcast_tags (tag_id, podcast_id) VALUES ($1, $2)"
-             tag_id (pod-episode-id an-episode)))
-          (loop (cdr rem))))))
-
-(define (pod-insert-subscription! a-pod a-user a-podcast)
+               "CREATE TYPE entity_type AS ENUM ("
+               "'podcast', "
+               "'episode', "
+               "'review', "
+               "'comment')")))
+(define/contract (init-pod-entities! a-pod)
+  (-> pod? void?)
+  (unless (query-maybe-value (pod-db a-pod)
+                             "SELECT TRUE FROM pg_type WHERE typname = $1"
+                             "entity_type")
+    (init-pod-entity-type! a-pod))
   (query-exec (pod-db a-pod)
               (string-append
-               "INSERT INTO subscriptions "
-               "(user_id, podcast_id) "
-               "VALUES "
-               "($1, $2)")
-              (pod-user-id a-user)
-              (pod-podcast-id a-podcast)))
-
-(define (pod-user-subscriptions a-pod a-user)
-  (define (id->podcast id)
-    (pod-podcast a-pod id))
-  (map id->podcast
-       (query-list (pod-db a-pod)
-                   "SELECT podcast_id FROM subscriptions WHERE user_id=$1"
-                   (pod-user-id a-user))))
-
-(define (pod-podcast-subscribers a-pod a-podcast)
-  (define (id->user id)
-    (pod-user a-pod id))
-  (map id->user
-       (query-list (pod-db a-pod)
-                   "SELECT user_id FROM subscriptions WHERE podcast_id=$1"
+               "CREATE TABLE entities ("
+               "id bigserial PRIMARY KEY, "
+               "type entity_type NOT NULL)")))
+(define/contract (pod-entity? v)
+  (-> any/c boolean?)
+  (for/or ((pred? (list pod-podcast?
+                        pod-episode?
+                        pod-review?
+                        pod-comment?)))
+    (pred? v)))
+(define/contract (pod-entity-id v)
+  (-> pod-entity? integer?)
+  (match v
+    ((struct pod-podcast (pod id)) id)
+    ((struct pod-episode (pod id)) id)
+    ((struct pod-review (pod id)) id)
+    ((struct pod-comment (pod id)) id)))
+(define/contract (pod-get-entity a-pod an-id)
+  (-> pod? integer? pod-entity?)
+  (define entity-structs
+    (hash "podcast" pod-podcast
+          "episode" pod-episode
+          "review" pod-review
+          "comment" pod-comment))
+  (let ((type (query-value (pod-db a-pod)
+                           "SELECT type FROM entities WHERE id = $1"
+                           an-id)))
+    ((hash-ref entity-structs type) a-pod an-id)))
+;Tags
+(define/contract (init-pod-tags! a-pod)
+  (-> pod? void?)
+  (query-exec (pod-db a-pod)
+              (string-append
+               "CREATE TABLE tags ("
+               "id serial PRIMARY KEY, "
+               "name text NOT NULL)")))
+(define/contract (pod-insert-tag! a-pod tag)
+  (-> pod? string? pod-tag?)
+  (pod-tag a-pod
+           (query-value (pod-db a-pod)
+                        "INSERT INTO tags (name) VALUES ($1) RETURNING id"
+                        tag)))
+(define/contract (init-pod-tag-entity-rels! a-pod)
+  (-> pod? void?)
+  (unless (table-exists? (pod-db a-pod) "entities")
+    (init-pod-podcasts! a-pod))
+  (unless (table-exists? (pod-db a-pod) "tags")
+    (init-pod-tags! a-pod))
+  (query-exec (pod-db a-pod)
+              (string-append
+               "CREATE TABLE tag_entity_rels ("
+               "id bigserial PRIMARY KEY, "
+               "tag_id integer REFERENCES tags (id) ON DELETE CASCADE, "
+               "entity_id bigint REFERENCES entities (id) ON DELETE CASCADE)")))
+(define/contract (pod-insert-tag-entity-rel! a-pod a-tag an-entity)
+  (-> pod? pod-tag? pod-entity? void?)
+  (query-exec (pod-db a-pod)
+              "INSERT INTO tag_entity_rels (tag_id, entity_id) VALUES ($1, $2)"
+              (pod-tag-id a-tag)
+              (pod-entity-id an-entity)))
+;Podcasts
+(define/contract (init-pod-podcast-authors! a-pod)
+  (-> pod? void)
+  (query-exec (pod-db a-pod)
+              (string-append
+               "CREATE TABLE podcast_authors ("
+               "id serial PRIMARY KEY, "
+               "name text NOT NULL UNIQUE, "
+               "email text)")))
+(define/contract (pod-insert-author! a-pod name)
+  (-> pod? string? pod-author?)
+  (pod-author a-pod
+              (query-value (pod-db a-pod)
+                           (string-append
+                            "INSERT INTO authors (name) VALUES ($1) "
+                            "RETURNING id")
+                            name)))
+(define/contract (pod-author-name an-author)
+  (-> pod-author? string?)
+  (query-value (pod-db (pod-author an-author))
+                "SELECT name FROM podcast_authors WHERE id = $1"
+                (pod-author-id an-author)))
+(define/contract (pod-author-podcasts an-author)
+  (-> pod-author? (listof pod-podcast?))
+  (map (lambda (id) (pod-podcast (pod-author-pod an-author) id))
+       (query-list (pod-db (pod-author-pod an-author))
+                   (string-append
+                    "SELECT id FROM podcasts "
+                    "WHERE author_id = $1")
+                   (pod-author-id an-author))))
+(define/contract (init-pod-podcasts! a-pod)
+  (-> pod? void?)
+  (unless (table-exists? (pod-db a-pod) "podcast_authors")
+    (init-pod-podcast-authors! a-pod))
+  (unless (table-exists? (pod-db a-pod) "entities")
+    (init-pod-entities! a-pod))
+  (query-exec (pod-db a-pod)
+              (string-append
+               "CREATE TABLE podcasts ("
+               "id bigint PRIMARY KEY REFERENCES entities (id) ON DELETE CASCADE, "
+               "feed_url text NOT NULL UNIQUE, "
+               "title text, "
+               "author_id integer REFERENCES podcast_authors (id) ON DELETE CASCADE, "
+               "explicit boolean NOT NULL, "
+               "description text, "
+               "image_url text)")))
+(define/contract (pod-insert-podcast! a-pod feed-url)
+  (-> pod? url? pod-podcast?)
+  (let ((id-or-false (query-maybe-value (pod-db a-pod)
+                                        "SELECT id FROM podcasts WHERE feed_url = $1"
+                                        (url->string feed-url))))
+    (if id-or-false
+        (pod-podcast a-pod id-or-false)
+        (with-handlers ((exn:fail? (lambda (ex) (raise-user-error 'pod-insert-podcast
+                                                                  "ERROR processing ~a:\n~a\n"
+                                                                  (url->string feed-url)
+                                                                  (exn-message ex)))))
+          (let ((podcast-info (get-podcast-info feed-url)))
+            (if (string? podcast-info)
+                (error podcast-info)
+                (let* ((pid (query-value (pod-db a-pod)
+                                         "INSERT INTO entities (type) VALUES ('podcast') RETURNING id"))
+                       (author (if (hash-has-key? podcast-info 'author) (pod-insert-author! (hash-ref podcast-info 'author)) #f))
+                       (the-podcast (pod-podcast a-pod pid)))
+                  (query-exec (pod-db a-pod)
+                              (string-append
+                               "INSERT INTO podcasts "
+                               "(id, feed_url, title, author_id, explicit, description, image_url) VALUES "
+                               "($1, $2, $3, $4, $5, $6, $7)")
+                            pid
+                            (hash-ref podcast-info 'feed_url)
+                            (hash-ref podcast-info 'title)
+                            (if author (pod-author-id author) sql-null)
+                            (hash-ref podcast-info 'explicit #t)
+                            (hash-ref podcast-info 'description sql-null)
+                            (hash-ref podcast-info 'image-url sql-null))
+                (for ((tag (hash-ref podcast-info 'tags '())))
+                  (let ((the-tag (pod-insert-tag! a-pod tag)))
+                    (pod-insert-tag-entity-rel! a-pod
+                                                the-tag
+                                                the-podcast)))
+                (for ((episode (hash-ref podcast-info 'episodes '())))
+                  (if (string? episode)
+                      (printf "\nfeed-url: ~a\n~a\n" (hash-ref podcast-info 'feed_url) episode)
+                      (pod-insert-episode! a-pod the-podcast episode)))
+                the-podcast)))))))
+                    
+(define/contract (pod-podcast-feed-url a-podcast)
+  (-> pod-podcast? url?)
+  (string->url
+   (query-value (pod-db (pod-podcast-pod a-podcast))
+                "SELECT feed_url FROM podcasts WHERE id = $1"
+                (pod-podcast-id a-podcast))))
+(define/contract (pod-podcast-title a-podcast)
+  (-> pod-podcast? string?)
+   (query-value (pod-db (pod-podcast-pod a-podcast))
+                "SELECT title FROM podcasts WHERE id = $1"
+                (pod-podcast-id a-podcast)))
+(define/contract (pod-podcast-author a-podcast)
+  (-> pod-podcast? pod-author?)
+  (pod-author (pod-podcast-pod a-podcast)
+              (query-value (pod-db (pod-podcast-pod a-podcast))
+                "SELECT author_id FROM podcasts WHERE id = $1"
+                (pod-podcast-id a-podcast))))
+(define/contract (pod-podcast-explicit? a-podcast)
+  (-> pod-podcast? boolean?)
+   (query-value (pod-db (pod-podcast-pod a-podcast))
+                "SELECT explicit FROM podcasts WHERE id = $1"
+                (pod-podcast-id a-podcast)))
+(define/contract (pod-podcast-description a-podcast)
+  (-> pod-podcast? string?)
+   (query-value (pod-db (pod-podcast-pod a-podcast))
+                "SELECT description FROM podcasts WHERE id = $1"
+                (pod-podcast-id a-podcast)))
+(define/contract (pod-podcast-image-url a-podcast)
+  (-> pod-podcast? url?)
+  (string->url
+   (query-value (pod-db (pod-podcast-pod a-podcast))
+                "SELECT image_url FROM podcasts WHERE id = $1"
+                (pod-podcast-id a-podcast))))
+(define/contract (pod-podcast-tags a-podcast)
+  (-> pod-podcast? (listof pod-tag?))
+  (define/contract (id->tag an-id)
+    (-> integer? pod-tag?)
+    (pod-tag (pod-podcast-pod a-podcast) an-id))
+  (map id->tag
+       (query-list (pod-db (pod-podcast-pod a-podcast))
+                   "SELECT tag_id FROM tag_entity_rels WHERE podcast_id = $1"
                    (pod-podcast-id a-podcast))))
 
-(define (pod-insert-follow! a-pod a-user1 a-user2)
+;Episodes
+(define/contract (init-pod-episodes! a-pod)
+  (-> pod? void?)
+  (unless (table-exists? (pod-db a-pod) "podcasts")
+    (init-pod-podcasts! a-pod))
   (query-exec (pod-db a-pod)
               (string-append
-               "INSERT INTO follows "
-               "(follower_id, followed_id, follow_accepted) "
-               "VALUES ($1, $2, $3)")
-              (pod-user-id a-user1)
-              (pod-user-id a-user2)
-              (if (pod-user-manually-approves-follows? a-user2)
-                  #f
-                  #t)))
-(define the-pod (init-pod!))
+               "CREATE TABLE episodes ("
+               "id bigint PRIMARY KEY REFERENCES entities (id) ON DELETE CASCADE, "
+               "podcast_id integer NOT NULL REFERENCES podcasts (id) ON DELETE CASCADE, "
+               "file_url text NOT NULL UNIQUE, "
+               "file_mimetype text NOT NULL, "
+               "title text, "
+               "description text, "
+               "duration integer, "
+               "image_url text, "
+               "image_mimetype text, "
+               "date_posted timestamp with time zone)")))
+(define/contract (pod-insert-episode! a-pod a-podcast episode-info)
+  (->* (pod? pod-podcast? hash?) pod-episode?)
+  (let ((the-ep (pod-episode a-pod (query-value (pod-db a-pod) "INSERT INTO entities (type) VALUES ('episode') RETURNING id"))))
+    (with-handlers ((exn:fail:sql?
+                     (lambda (ex) (let ((msg (cdr (assoc 'message (exn:fail:sql-info ex)))))
+                                    (raise-user-error 'pod-insert-episode "Podcast: ~a\nEpisode: ~a\n~a\nSQLSTATE: ~a\n"
+                                                      (pod-podcast-title a-podcast)
+                                                      (hash-ref episode-info 'title)
+                                                      msg (exn:fail:sql-sqlstate ex))))))
+      (query-exec (pod-db a-pod)
+                  (string-append
+                   "INSERT INTO episodes VALUES "
+                   "($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)")
+                  (pod-episode-id the-ep)
+                  (pod-podcast-id a-podcast)
+                  (hash-ref episode-info 'url)
+                  (hash-ref episode-info 'file_mimetype)
+                  (hash-ref episode-info 'title sql-null)
+                  (hash-ref episode-info 'description sql-null)
+                  (hash-ref episode-info 'duration sql-null)
+                  (hash-ref episode-info 'image_url sql-null)
+                  (hash-ref episode-info 'image_mimetype sql-null)
+                  (hash-ref episode-info 'date_published sql-null)))
+    (for ((tag (hash-ref episode-info 'tags '())))
+      (let ((tag (pod-insert-tag! a-pod tag)))
+        (pod-insert-tag-entity-rel! a-pod tag the-ep)))
+    the-ep))
+(define/contract (pod-episode-url an-episode)
+  (-> pod-episode? string?)
+  (query-value (pod-db (pod-podcast-pod an-episode))
+               "SELECT file_url FROM episodes WHERE id = $1"
+               (pod-episode-id an-episode)))
+(define/contract (pod-episode-file-mimetype an-episode)
+  (-> pod-episode? string?)
+  (query-value (pod-db (pod-podcast-pod an-episode))
+               "SELECT file_mimetype FROM episodes WHERE id = $1"
+               (pod-episode-id an-episode)))
+(define/contract (pod-episode-title an-episode)
+  (-> pod-episode? string?)
+  (query-value (pod-db (pod-podcast-pod an-episode))
+               "SELECT title FROM episodes WHERE id = $1"
+               (pod-episode-id an-episode)))
+(define/contract (pod-episode-description an-episode)
+  (-> pod-episode? (or/c string? #f))
+  (query-maybe-value (pod-db (pod-podcast-pod an-episode))
+                     "SELECT description FROM episodes WHERE id = $1"
+                     (pod-episode-id an-episode)))
+(define/contract (pod-episode-image-url an-episode)
+  (-> pod-episode? (or/c string? #f))
+  (or
+   (query-maybe-value (pod-db (pod-podcast-pod an-episode))
+                      "SELECT image_url FROM episodes WHERE id = $1"
+                      (pod-episode-id an-episode))
+   (let ((podcast-id (query-value (pod-db (pod-podcast-pod an-episode))
+                                  "SELECT podcast_id FROM episodes WHERE id = $1"
+                                  (pod-episode-id an-episode))))
+     (query-maybe-value (pod-db (pod-podcast-pod an-episode))
+                        "SELECT image_url FROM podcasts WHERE id = $1"
+                        podcast-id))))
+(define/contract (pod-episode-image-mimetype an-episode)
+  (-> pod-episode? (or/c string? #f))
+  (or
+   (query-maybe-value (pod-db (pod-podcast-pod an-episode))
+                      "SELECT image_mimetype FROM episodes WHERE id = $1"
+                      (pod-episode-id an-episode))
+   (let ((podcast-id (query-value (pod-db (pod-podcast-pod an-episode))
+                                  "SELECT podcast_id FROM episodes WHERE id = $1"
+                                  (pod-episode-id an-episode))))
+     (query-maybe-value (pod-db (pod-podcast-pod an-episode))
+                        "SELECT image_mimetype FROM podcasts WHERE id = $1"
+                        podcast-id))))
+(define/contract (pod-episode-date-published an-episode)
+  (-> pod-episode? integer?)
+  (let ((the-date
+         (sql-datetime->srfi-date (query-value (pod-db (pod-podcast-pod an-episode))
+                                               "SELECT date_posted FROM episodes WHERE id = $1"
+                                               (pod-episode-id an-episode)))))
+    (date->seconds the-date #f)))
+;Images
+(define/contract (init-pod-images! a-pod)
+  (-> pod? void?)
+  (query-exec (pod-db a-pod)
+              (string-append
+               "CREATE TABLE images ("
+               "id serial PRIMARY KEY, "
+               "image bytea NOT NULL, "
+               "mime_type varchar(50) NOT NULL)")))
 
-(provide pod pod-db the-pod pod-insert-podcast!)
+;Users and Profiles
+(define/contract (init-pod-profiles! a-pod)
+  (-> pod? void?)
+  (unless (table-exists? (pod-db a-pod) "images")
+    (init-pod-images! a-pod))
+  (query-exec (pod-db a-pod)
+              (string-append
+               "CREATE TABLE profiles ("
+               "id serial PRIMARY KEY, "
+               "name text, "
+               "username text NOT NULL UNIQUE, "
+               "icon_id integer REFERENCES images (id) ON DELETE CASCADE, "
+               "icon_alt text, "
+               "image_id integer REFERENCES images (id) ON DELETE CASCADE, "
+               "image_alt text, "
+               "description text, "
+               "manually_approves_follows boolean DEFAULT true,"
+               "created_on timestamp with time zone DEFAULT CURRENT_TIMESTAMP)")))
+(define/contract (init-pod-users! a-pod)
+  (-> pod? void?)
+  (unless (table-exists? (pod-db a-pod) "profiles")
+    (init-pod-profiles! a-pod))
+  (query-exec (pod-db a-pod)
+              (string-append
+               "CREATE TABLE users ("
+               "id serial PRIMARY KEY, "
+               "email text NOT NULL UNIQUE, "
+               "password text NOT NULL, "
+               "profile_id integer REFERENCES profiles (id) ON DELETE CASCADE)")))
 
-(define clear
-    (lambda () (clear-pod! "dolphin_pod" "dan")))
-(define init
-    (lambda () (init-pod! "dolphin_pod" "dan")))
+(define/contract (pod-insert-user! a-pod username email password)
+  (-> pod? string? string? string? pod-user?)
+  (define email-exists?
+    (if
+     (query-maybe-value (pod-db a-pod)
+                        (string-append
+                         "SELECT id FROM users "
+                         "WHERE email ILIKE $1")
+                        email)
+     #t
+     #f))
+  (define username-exists?
+    (if
+     (query-maybe-value (pod-db a-pod)
+                        (string-append
+                         "SELECT id FROM profiles "
+                         "WHERE username ILIKE $1")
+                        username)
+     #t
+     #f))
+  (cond
+    ((and email-exists? username-exists?)
+     (raise-user-error 'user-exists))
+    (email-exists? (raise-user-error 'email-exists))
+    (username-exists? (raise-user-error 'username-exists))
+    (else
+     (let ((profile-id (query-value (pod-db a-pod)
+                                    (string-append
+                                     "INSERT INTO profiles "
+                                     "(username) "
+                                     "VALUES ($1) "
+                                     "RETURNING id")
+                                    username
+                                    )))
+       (pod-user a-pod
+                 (query-value (pod-db a-pod)
+                              (string-append
+                               "INSERT INTO users "
+                               "(email, password, profile_id) "
+                               "VALUES ($1, crypt($2, gen_salt('bf', 8)), $3) "
+                               "RETURNING id")
+                              email
+                              password
+                              profile-id))))))
+(define/contract (pod-user-login a-pod username-or-email password)
+  (-> pod? string? string? (or/c #f pod-user?))
+  (let ((uid
+         (query-maybe-value (pod-db a-pod)
+                            (string-append
+                             "SELECT users.id FROM "
+                             "users JOIN profiles ON users.profile_id = profile.id "
+                             "WHERE ( profiles.username = $1 OR users.email = $1 ) "
+                             "AND users.password = crypt($2, password)")
+                            username-or-email password)))
+    (if uid
+        (pod-user a-pod uid)
+        #f)))
+(define/contract (pod-user-email a-user)
+  (-> pod-user? string?)
+  (query-value (pod-db (pod-user-pod a-user))
+               "SELECT email FROM users WHERE id = $1"
+               (pod-user-id a-user)))
+(define/contract (pod-user-profile a-user)
+  (-> pod-user? pod-profile?)
+  (pod-profile (pod-user-pod a-user)
+               (query-value (pod-db (pod-user-pod a-user))
+                            "SELECT profile_id FROM users WHERE id = $1"
+                            (pod-user-id a-user))))
+(define/contract (pod-profile-username a-profile)
+  (-> pod-profile? string?)
+  (query-value (pod-db (pod-profile-pod a-profile))
+               "SELECT username FROM profiles WHERE id = $1"
+               (pod-profile-id a-profile)))
+(define/contract (pod-profile-name a-profile)
+  (-> pod-profile? (or/c #f string?))
+  (query-maybe-value (pod-db (pod-profile-pod a-profile))
+                     "SELECT name FROM profiles WHERE id = $1"
+                     (pod-profile-id a-profile)))
+(define/contract (pod-profile-description a-profile)
+  (-> pod-profile? (or/c #f string?))
+  (query-maybe-value (pod-db (pod-profile-pod a-profile))
+                     "SELECT description FROM profiles WHERE id = $1"
+                     (pod-profile-id a-profile)))
+(define/contract (pod-profile-icon a-profile)
+  (-> pod-profile? (or/c #f bytes?))
+  (query-maybe-value (pod-db (pod-profile-pod a-profile))
+                     (string-append
+                      "SELECT images.image FROM "
+                      "profiles JOIN images "
+                      "ON profiles.icon_id = images.id "
+                      "WHERE profiles.id = $1")
+                     (pod-profile-id a-profile)))
+(define/contract (pod-profile-icon-mimetype a-profile)
+  (-> pod-profile? (or/c #f string?))
+  (query-maybe-value (pod-db (pod-profile-pod a-profile))
+                     (string-append
+                      "SELECT images.mime_type FROM "
+                      "profiles JOIN images "
+                      "ON profiles.icon_id = images.id "
+                      "WHERE profiles.id = $1")
+                     (pod-profile-id a-profile)))
+(define/contract (pod-profile-image a-profile)
+  (-> pod-profile? (or/c #f bytes?))
+  (query-maybe-value (pod-db (pod-profile-pod a-profile))
+                     (string-append
+                      "SELECT images.image FROM "
+                      "profiles JOIN images "
+                      "ON profiles.image_id = images.id "
+                      "WHERE profiles.id = $1")
+                     (pod-profile-id a-profile)))
+(define/contract (pod-profile-image-mimetype a-profile)
+  (-> pod-profile? (or/c #f string?))
+  (query-maybe-value (pod-db (pod-profile-pod a-profile))
+                     (string-append
+                      "SELECT images.mime_type FROM "
+                      "profiles JOIN images "
+                      "ON profiles.image_id = images.id "
+                      "WHERE profiles.id = $1")
+                     (pod-profile-id a-profile)))
+(define/contract (pod-profile-manually-approves-follows? a-profile)
+  (-> pod-profile? boolean?)
+  (query-value (pod-db (pod-profile-pod a-profile))
+               "SELECT manually_approves_follows FROM profiles WHERE id = $1"
+               (pod-profile-id a-profile)))
+;Reviews
+(define/contract (init-pod-reviews! a-pod)
+  (-> pod? void?)
+  (query-exec (pod-db a-pod)
+              (string-append
+               "CREATE TABLE podcast_reviews ("
+               "id bigint PRIMARY KEY REFERENCES entities (id) ON DELETE CASCADE, "
+               "podcast_id bigint NOT NULL REFERENCES podcasts (id) ON DELETE CASCADE, "
+               "profile_id integer NOT NULL REFERENCES profiles (id) ON DELETE CASCADE, "
+               "review text, rating smallint, "
+               "recommended_episode_id bigint REFERENCES episodes (id) ON DELETE CASCADE, "
+               "created_on timestamp with time zone DEFAULT CURRENT_TIMESTAMP, "
+               "CONSTRAINT rating_limit CHECK ( rating <= 5 AND rating > 0 ), "
+               "CONSTRAINT podcast_profile_unique UNIQUE (podcast_id, profile_id))")))
+(define/contract (pod-insert-review! a-profile a-podcast #:review-text (review-text #f) #:rating (rating #f) #:episode (recommended-ep #f))
+  (->* (pod-profile? pod-podcast?) (#:review-text (or/c string? #f) #:rating (or/c integer? #f) #:episode (or/c pod-episode? #f)) (or/c pod-review? #f))
+  (define review-id
+    (or
+     (query-maybe-value (pod-db (pod-profile-pod a-profile))
+                        (string-append
+                         "SELECT id FROM reviews "
+                         "WHERE podcast_id = $1 "
+                         "AND profile_id = $2")
+                        (pod-podcast-id a-podcast)
+                        (pod-profile-id a-profile))
+     (query-value (pod-db (pod-profile-pod a-profile))
+                  (string-append
+                   "INSERT INTO entities (type) VALUES ('review') "
+                   "RETURNING id"))))
+  (begin
+    (query-exec (pod-db (pod-profile-pod a-profile))
+                (string-append
+                 "INSERT INTO reviews VALUES"
+                 "($1, $2, $3, $4, $5, $6) "
+                 "ON CONFLICT ON CONSTRAINT podcast_profile_unique "
+                 "DO UPDATE SET (review, rating, recommended_episode_id) = ($4, $5, $6)")
+                review-id
+                (pod-podcast-id a-podcast)
+                (pod-profile-id a-profile)
+                (false->sql-null review-text)
+                (false->sql-null rating)
+                (if recommended-ep
+                    (pod-episode-id recommended-ep)
+                    sql-null))
+    (pod-review (pod-profile-pod a-profile) review-id)))
+
+;Comments
+(define/contract (init-pod-comments! a-pod)
+  (-> pod? void?)
+  (query-exec (pod-db a-pod)
+              (string-append
+               "CREATE TABLE comments ("
+               "id bigint PRIMARY KEY REFERENCES entities (id) ON DELETE CASCADE, "
+               "review_id bigint NOT NULL REFERENCES podcast_reviews (id) ON DELETE CASCADE, "
+               "profile_id integer NOT NULL REFERENCES profiles (id) ON DELETE CASCADE, "
+               "in_reply_to_id bigint REFERENCES comments (id) ON DELETE CASCADE, "
+               "comment_text text NOT NULL, "
+               "created_on timestamp with time zone DEFAULT CURRENT_TIMESTAMP)")))
+
+;Relations
+(define/contract (init-pod-subscriptions! a-pod)
+  (-> pod? void?)
+  (query-exec (pod-db a-pod)
+              (string-append
+               "CREATE TABLE subscriptions ("
+               "id serial PRIMARY KEY, "
+               "podcast_id integer REFERENCES podcasts (id) ON DELETE CASCADE, "
+               "profile_id integer REFERENCES profiles (id) ON DELETE CASCADE, "
+               "created_on timestamp with time zone DEFAULT CURRENT_TIMESTAMP)")))
+(define/contract (pod-subscribe! a-pod a-profile a-podcast)
+  (-> pod? pod-profile? pod-podcast? void?)
+  (query-exec (pod-db a-pod)
+              (string-append
+               "INSERT INTO subscriptions (podcast_id, profile_id) "
+               "VALUES ($1, $2)"
+               )
+              (pod-podcast-id a-podcast)
+              (pod-profile-id a-profile)))
+(define/contract (pod-profile-subscriptions/by-latest-episode a-pod a-profile)
+  (-> pod? pod-profile? (listof pod-podcast?))
+  (let ((rows
+         (query-rows (pod-db a-pod)
+                     (string-append
+                      "SELECT podcast_id, max(episodes.date_posted) AS latest_episode_date"
+                      "FROM subscriptions JOIN episodes USING (podcast_id) "
+                      "WHERE subscriptions.profile_id = $1 "
+                      "GROUP BY podcast_id "
+                      "ORDER BY max(episodes.date_posted) DESC")
+                     (pod-profile-id a-profile))))
+    (map (lambda (row) (pod-podcast (a-pod) (vector-ref row 0))) rows)))
+
+(define/contract (init-pod-profile-episode-rels! a-pod)
+  (-> pod? void?)
+  (query-exec (pod-db a-pod)
+              (string-append
+               "CREATE TABLE profile_episode_rels ("
+               "id serial PRIMARY KEY, "
+               "episode_id integer REFERENCES episodes (id) ON DELETE CASCADE, "
+               "profile_id integer REFERENCES profiles (id) ON DELETE CASCADE, "
+               "seconds_listened integer, "
+               "listened boolean, "
+               "starred_on timestamp with time zone DEFAULT NULL, "
+               "shared_on timestamp with time zone DEFAULT NULL)")))
+(define/contract (init-pod-stars! a-pod)
+  (-> pod? void?)
+  (query-exec (pod-db a-pod)
+              (string-append
+               "CREATE TABLE profile_entity_stars ("
+               "id serial PRIMARY KEY, "
+               "profile_id integer REFERENCES profiles (id) ON DELETE CASCADE, "
+               "entity_id bigint REFERENCES entities (id) ON DELETE CASCADE, "
+               "starred_on timestamp with time zone DEFAULT CURRENT_TIMESTAMP)")))
+(define/contract (init-pod-shares! a-pod)
+  (-> pod? void?)
+  (query-exec (pod-db a-pod)
+              (string-append
+               "CREATE TABLE profile_entity_shares ("
+               "id serial PRIMARY KEY, "
+               "profile_id integer REFERENCES profiles (id) ON DELETE CASCADE, "
+               "entity_id bigint REFERENCES entities (id) ON DELETE CASCADE, "
+               "shared_on timestamp with time zone DEFAULT CURRENT_TIMESTAMP)")))
+(module* main #f
+  (require racket/port)
+  (define the-pod (init-pod!))
+  (define feeds (import-opml (port->bytes (open-input-file "/home/dan/Downloads/PocketCasts.opml"))))
+  (for ((feed feeds))
+    (if (string? (cdr feed))
+        (void)
+        (pod-insert-podcast! the-pod (cdr feed))))
+  )

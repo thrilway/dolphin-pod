@@ -13,11 +13,11 @@ def episode_info(entry):
             else:
                 continue
     out = dict()
-    out["title"] = entry.title
-    out["description"] = entry.description
-    out["date_published"] = entry.published
+    out["title"] = entry.get("title", None)
+    out["description"] = entry.get("description", None)
+    out["date_published"] = entry.get("published", None)
     out["file_url"] = get_episode_url()
-    out["duration"] = entry.itunes_duration
+    out["duration"] = entry.get("itunes_duration", None)
     if entry.has_key("tags"):
         out["tags"] = [t["term"] for t in entry.tags]
     else:
@@ -42,10 +42,12 @@ def podcast_info(feed):
     return out
 
 if __name__ == "__main__":
-    enc = json.JSONEncoder()
-    feedUrl = sys.argv[1]
-    d = feedparser.parse(feedUrl)
+#    feedUrl = sys.argv[1]
+    feed_str = sys.stdin.read()
+    d = feedparser.parse(feed_str)
+    #sys.stdin = open("/dev/tty")
     out = podcast_info(d.feed)
     out["episodes"] = episodes_info(d.entries)
-    print(enc.encode(out))
+    enc = json.JSONEncoder()
+    sys.stdout.write(enc.encode(out))
     sys.exit(0)

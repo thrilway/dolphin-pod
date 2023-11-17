@@ -5,8 +5,9 @@ import lxml
 import json
 import sys
 
-def parse_xml(xml_string):
-    soup = BeautifulSoup(xml_string, "xml")
+def parse_xml(fp):
+    sys.stderr.write("Parsing xml\n")
+    soup = BeautifulSoup(fp, "xml")
     feeds = []
     for tag in soup.find_all("outline"):
         if not tag.has_attr("xmlUrl"):
@@ -17,7 +18,8 @@ def parse_xml(xml_string):
     return feeds
 
 if __name__ == "__main__":
-    in_s = open(sys.argv[1], 'r').read()
+    sys.stderr.write("Running the python file.\n")
+    feeds = parse_xml(sys.stdin)
     enc = json.JSONEncoder()
-    print(enc.encode(parse_xml(in_s)))
+    sys.stdout.write(enc.encode(feeds))
     sys.exit(0)
