@@ -6,7 +6,7 @@
          ;"webfinger.rkt"
          "model.rkt"
          "workers.rkt")
-
+(define the-pod (init-pod!))
 (define/contract (home req)
   (-> request? response?)
   (render-dolphin-pod the-pod req))
@@ -83,7 +83,7 @@
     (if (null? rem)
         (void)
         (begin
-          (pod-insert-podcast! a-pod (hash-ref (car rem) 'feedUrl))
+          (pod-insert-podcast! a-pod  (cdar rem))
           (loop (cdr rem))))))
 
 (define/contract (render-subscribe-page a-pod req)

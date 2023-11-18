@@ -11,7 +11,12 @@
     (for/fold ((out '())
                #:result out)
               ((url-assoc feed-url-alist))
-      (append out (list (cons (car url-assoc) (resolve-feed-url-or-fail (string->url/safe (cdr url-assoc)))))))))
+      (let ((resolved (resolve-feed-url-or-fail (string->url/safe (cdr url-assoc)))))
+        (if (string? resolved)
+            (begin
+              (log-error "Could not resolve feed for ~a.\nURL: ~a\nReason: ~a" (car url-assoc) (cdr url-assoc) resolved)
+              out)
+            (append out (list (cons (car url-assoc) (resolve-feed-url-or-fail (string->url/safe (cdr url-assoc)))))))))))
 
 (define/contract (extract-feeds-from-opml-xexpr xml-xexpr)
   (-> x:xexpr? (listof (cons/c string? string?)))
