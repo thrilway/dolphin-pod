@@ -232,7 +232,7 @@
                "feed_url text NOT NULL UNIQUE, "
                "title text, "
                "author_id integer REFERENCES podcast_authors (id) ON DELETE CASCADE, "
-               "explicit boolean NOT NULL, "
+               "explicit boolean, "
                "description text, "
                "image_url text)")))
 (define/contract (pod-insert-podcast! a-pod feed-url)
@@ -262,7 +262,7 @@
                             (hash-ref podcast-info 'feed_url)
                             (hash-ref podcast-info 'title)
                             (if author (pod-author-id author) sql-null)
-                            (hash-ref podcast-info 'explicit #t)
+                            (hash-ref podcast-info 'explicit sql-null)
                             (hash-ref podcast-info 'description sql-null)
                             (hash-ref podcast-info 'image-url sql-null))
                 (for ((tag (hash-ref podcast-info 'tags '())))
@@ -293,8 +293,8 @@
               (query-value (pod-db (pod-podcast-pod a-podcast))
                 "SELECT author_id FROM podcasts WHERE id = $1"
                 (pod-podcast-id a-podcast))))
-(define/contract (pod-podcast-explicit? a-podcast)
-  (-> pod-podcast? boolean?)
+(define/contract (pod-podcast-explicit a-podcast)
+  (-> pod-podcast? (or/c null? boolean?))
    (query-value (pod-db (pod-podcast-pod a-podcast))
                 "SELECT explicit FROM podcasts WHERE id = $1"
                 (pod-podcast-id a-podcast)))
@@ -700,6 +700,10 @@
                "profile_id integer REFERENCES profiles (id) ON DELETE CASCADE, "
                "entity_id bigint REFERENCES entities (id) ON DELETE CASCADE, "
                "shared_on timestamp with time zone DEFAULT CURRENT_TIMESTAMP)")))
+(provide (except-out (all-defined-out)
+                     getenv-or-die
+                     getenv-or-false
+                     load-db db-source connect!))
 (module* main #f
   (require racket/port)
   (define the-pod (init-pod!))
