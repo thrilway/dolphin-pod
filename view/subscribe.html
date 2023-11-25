@@ -1,0 +1,41 @@
+<form id="subscribe-form">
+	@(xexpr->string (car (formlet-display subscribe-formlet)))
+	<input type="submit" />
+</form>
+<script type="text/javascript" >
+	window.addEventListener("load", () => {
+		function feedSubmit () {
+			const FD = new FormData(form);
+			const qstr = new URLSearchParams(FD).toString();
+			fetch("subscribe", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/x-www-form-urlencoded"
+				 },
+				 referrer: @redir-uri,
+				 body: qstr
+			}
+			).then((response) => {
+				if (response.redirected) {
+					return response;					
+				} else {
+					return subscribeError(response);
+				};
+			});
+		};
+		function subscribeError (resp) {
+			const feedUrlDiv = document.querySelector("#feedUrlDom");
+			const errorMsg = document.createElement("span");
+			errorMsg.setAttribute("class", "errorMsg");
+			errorMsg.textContent("Something went wrong!");
+			feedUrlDiv.appendChild(errorMsg);
+			return;
+		}
+		const form = document.getElementById("subscribe-form");
+		form.addEventListener("submit", (event) => {
+			event.preventDefault();
+			
+			feedSubmit();
+			}
+	});
+</script>

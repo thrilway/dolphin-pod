@@ -1,0 +1,4 @@
+<h2>@(pod-episode-title the-episode)</h2>
+<div class="episode-description">
+	@(pod-episode-description the-episode)
+</div>

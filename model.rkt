@@ -318,6 +318,25 @@
        (query-list (pod-db (pod-podcast-pod a-podcast))
                    "SELECT tag_id FROM tag_entity_rels WHERE podcast_id = $1"
                    (pod-podcast-id a-podcast))))
+(define/contract (pod-podcast-latest-episode-date a-podcast)
+  (-> pod-podcast? integer?)
+  (let ((most-recent-ep (pod-episode (pod-podcast-pod a-podcast)
+                                     (query-value (pod-db (pod-podcast-pod a-podcast))
+                                                  (string-append
+                                                   "SELECT id FROM episodes "
+                                                   "WHERE podcast_id = $1 "
+                                                   "ORDER BY date_posted DESC "
+                                                   "LIMIT 1")
+                                                  (pod-podcast-id a-podcast)))))
+    (pod-episode-date-published most-recent-ep)))
+(define/contract (pod-podcast-reviews a-podcast)
+  (-> pod-podcast? (listof pod-review?))
+  (let ((review-ids (query-list (pod-db (pod-podcast-pod a-podcast))
+                                 "SELECT id FROM review WHERE podcast_id = $1"
+                                 (pod-podcast-id a-podcast))))
+    (map (lambda (id) (pod-review (pod-podcast-pod a-podcast) id))
+         review-ids)))
+
 
 ;Episodes
 (define/contract (init-pod-episodes! a-pod)
@@ -364,6 +383,13 @@
       (let ((tag (pod-insert-tag! a-pod tag)))
         (pod-insert-tag-entity-rel! a-pod tag the-ep)))
     the-ep))
+(define/contract (pod-episode-exists? an-episode)
+  (-> pod-episode? boolean?)
+  (if (query-maybe-value (pod-db (pod-episode-pod an-episode))
+                         "SELECT id FROM episodes WHERE id = $1"
+                         (pod-episode-id an-episode))
+      #t
+      #f))
 (define/contract (pod-episode-url an-episode)
   (-> pod-episode? string?)
   (query-value (pod-db (pod-podcast-pod an-episode))
@@ -410,11 +436,9 @@
                         podcast-id))))
 (define/contract (pod-episode-date-published an-episode)
   (-> pod-episode? integer?)
-  (let ((the-date
-         (sql-datetime->srfi-date (query-value (pod-db (pod-podcast-pod an-episode))
-                                               "SELECT date_posted FROM episodes WHERE id = $1"
-                                               (pod-episode-id an-episode)))))
-    (date->seconds the-date #f)))
+  (sql-timestamp->seconds (query-value (pod-db (pod-podcast-pod an-episode))
+                                       "SELECT date_posted FROM episodes WHERE id = $1"
+                                       (pod-episode-id an-episode))))
 ;Images
 (define/contract (init-pod-images! a-pod)
   (-> pod? void?)
@@ -453,8 +477,8 @@
                "id serial PRIMARY KEY, "
                "email text NOT NULL UNIQUE, "
                "password text NOT NULL, "
+               "is_verified boolean DEFAULT false, "
                "profile_id integer REFERENCES profiles (id) ON DELETE CASCADE)")))
-
 (define/contract (pod-insert-user! a-pod username email password)
   (-> pod? string? string? string? pod-user?)
   (define email-exists?
@@ -499,15 +523,30 @@
                               email
                               password
                               profile-id))))))
+(define/contract (pod-user-verify! a-user)
+  (-> pod-user? void?)
+  (query-exec (pod-db (pod-user-pod a-user))
+              "UPDATE users SET is_verified = true WHERE id = $1"
+              (pod-user-id a-user)))
+(define/contract (pod-user-remove! a-user)
+  (-> pod-user? void)
+  (let ((profile-id
+         (query-value (pod-db (pod-user-pod a-user))
+                      "DELETE FROM users WHERE id = $1 RETURNING profile_id"
+                      (pod-user-id a-user))))
+    (query-exec (pod-db (pod-user-pod a-user))
+                "DELETE FROM profiles WHERE id = $1"
+                profile-id)))
 (define/contract (pod-user-login a-pod username-or-email password)
   (-> pod? string? string? (or/c #f pod-user?))
   (let ((uid
          (query-maybe-value (pod-db a-pod)
                             (string-append
                              "SELECT users.id FROM "
-                             "users JOIN profiles ON users.profile_id = profile.id "
-                             "WHERE ( profiles.username = $1 OR users.email = $1 ) "
-                             "AND users.password = crypt($2, password)")
+                             "users JOIN profiles ON users.profile_id = profiles.id "
+                             "WHERE users.is_verified AND "
+                             "( profiles.username = $1 OR users.email = $1 ) "
+                             "AND users.password = crypt($2, users.password)")
                             username-or-email password)))
     (if uid
         (pod-user a-pod uid)
@@ -624,7 +663,60 @@
                     (pod-episode-id recommended-ep)
                     sql-null))
     (pod-review (pod-profile-pod a-profile) review-id)))
-
+(define/contract (pod-review-podcast a-review)
+  (-> pod-review? pod-podcast?)
+  (let ((pid (query-value
+              (pod-db (pod-review-pod a-review))
+              (string-append
+               "SELECT podcast_id FROM reviews "
+               "WHERE id = $1")
+              (pod-review-id a-review))))
+    (pod-podcast (pod-review-pod a-review)
+                 pid)))
+(define/contract (pod-review-profile a-review)
+  (-> pod-review? pod-profile?)
+  (let ((pid (query-value
+              (pod-db (pod-review-pod a-review))
+              (string-append
+               "SELECT profile_id FROM reviews "
+               "WHERE id = $1")
+              (pod-review-id a-review))))
+    (pod-profile (pod-review-pod a-review)
+                 pid)))
+(define/contract (pod-review-text a-review)
+  (-> pod-review? string?)
+  (query-value
+   (pod-db (pod-review-pod a-review))
+   (string-append
+    "SELECT review FROM reviews "
+    "WHERE id = $1")
+   (pod-review-id a-review)))
+(define/contract (pod-review-rating a-review)
+  (-> pod-review? integer?)
+  (query-value
+   (pod-db (pod-review-pod a-review))
+   (string-append
+    "SELECT rating FROM reviews "
+    "WHERE id = $1")
+   (pod-review-id a-review)))
+(define/contract (pod-review-recommended-episode a-review)
+  (-> pod-review? pod-episode?)
+  (let ((eid (query-value
+              (pod-db (pod-review-pod a-review))
+              (string-append
+               "SELECT recommended_episode_id FROM reviews "
+               "WHERE id = $1")
+              (pod-review-id a-review))))
+    (pod-episode (pod-review-pod a-review) eid)))
+(define/contract (pod-review-date-posted a-review)
+  (-> pod-review? integer?)
+  (sql-timestamp->seconds
+   (query-value
+    (pod-db (pod-review-pod a-review))
+    (string-append
+     "SELECT date_posted FROM reviews "
+     "WHERE id = $1")
+    (pod-review-id a-review))))
 ;Comments
 (define/contract (init-pod-comments! a-pod)
   (-> pod? void?)
@@ -647,16 +739,24 @@
                "id serial PRIMARY KEY, "
                "podcast_id integer REFERENCES podcasts (id) ON DELETE CASCADE, "
                "profile_id integer REFERENCES profiles (id) ON DELETE CASCADE, "
-               "created_on timestamp with time zone DEFAULT CURRENT_TIMESTAMP)")))
-(define/contract (pod-subscribe! a-pod a-profile a-podcast)
-  (-> pod? pod-profile? pod-podcast? void?)
-  (query-exec (pod-db a-pod)
-              (string-append
-               "INSERT INTO subscriptions (podcast_id, profile_id) "
-               "VALUES ($1, $2)"
-               )
-              (pod-podcast-id a-podcast)
-              (pod-profile-id a-profile)))
+               "created_on timestamp with time zone DEFAULT CURRENT_TIMESTAMP)"
+              )))
+(define/contract (pod-subscribe! a-profile a-podcast)
+  (-> pod-profile? pod-podcast? void?)
+  (if (query-maybe-value (pod-db (pod-profile-pod a-profile))
+                         (string-append
+                          "SELECT id FROM subscriptions WHERE "
+                          "podcast_id = $1, "
+                          "profile_id = $2)")
+                         (pod-profile-id a-profile)
+                         (pod-podcast-id a-podcast))
+      (void)
+      (query-exec (pod-db (pod-profile-pod a-profile))
+                  (string-append
+                   "INSERT INTO subscriptions (podcast_id, profile_id) "
+                   "VALUES ($1, $2)")
+                  (pod-podcast-id a-podcast)
+                  (pod-profile-id a-profile))))
 (define/contract (pod-profile-subscriptions/by-latest-episode a-pod a-profile)
   (-> pod? pod-profile? (listof pod-podcast?))
   (let ((rows
@@ -682,6 +782,30 @@
                "listened boolean, "
                "starred_on timestamp with time zone DEFAULT NULL, "
                "shared_on timestamp with time zone DEFAULT NULL)")))
+(define/contract (pod-profile-recent-episodes a-profile #:count (count 20) #:show-archived? (show-archived? #f))
+  (->* (pod-profile?)
+       (#:count exact-positive-integer?
+        #:show-archived? boolean?)
+       (listof pod-episode?))
+  (define ep-ids (query-list (pod-db (pod-profile-pod a-profile))
+                               (string-append
+                                "WITH profile_subs AS (SELECT podcast_id FROM subscriptions WHERE profile_id = $1)"
+                                (if show-archived?
+                                    " "
+                                    ", profile_eps AS (SELECT * FROM profile_episode_rels WHERE profile_id = $1) ")
+                                "SELECT episodes.id FROM "
+                                "profile_subs JOIN episodes ON episodes.podcast_id = profile_subs.podcast_id "
+                                (if show-archived?
+                                    ""
+                                    (string-append
+                                     "LEFT JOIN profile_eps ON episodes.id = profile_eps.episode_id "
+                                     "WHERE (NOT profile_eps.listened) OR (profile_eps.listened ISNULL) "))
+                                "ORDER BY episodes.date_posted DESC "
+                                "LIMIT $2")
+                               (pod-profile-id a-profile)
+                               count))
+  (map (lambda (id) (pod-episode (pod-profile-pod) id)) ep-ids))
+       
 (define/contract (init-pod-stars! a-pod)
   (-> pod? void?)
   (query-exec (pod-db a-pod)
@@ -700,6 +824,11 @@
                "profile_id integer REFERENCES profiles (id) ON DELETE CASCADE, "
                "entity_id bigint REFERENCES entities (id) ON DELETE CASCADE, "
                "shared_on timestamp with time zone DEFAULT CURRENT_TIMESTAMP)")))
+
+(define/contract (sql-timestamp->seconds tsz)
+  (-> sql-timestamp? integer?)
+  (date->seconds (sql-datetime->srfi-date tsz)))
+
 (provide (except-out (all-defined-out)
                      getenv-or-die
                      getenv-or-false

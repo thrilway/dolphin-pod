@@ -1,0 +1,43 @@
+@(define form-elems (formlet-display login-formlet))
+<form id="login-form">
+		@(string-join (map xexpr->string form-elems) "\n")
+		<input type="submit" />
+</form>
+	<script>
+window.addEventListener("load", () => {
+	function loginError (resp) {
+		console.log("Login Error");
+		return resp;
+	};
+			function loginSubmit () {
+			const redirUri = "@redir-uri";
+			const FD = new FormData(form);
+			const qstr = new URLSearchParams(FD).toString();
+			fetch( "login", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/x-www-form-urlencoded"
+				 },
+				 referrer: redirUri,
+				 body: qstr
+				}).then((response) => {
+			if (response.redirected) {
+				const next = response.headers.get("location");
+				window.location.replace(next);
+				return;
+			} else {
+				loginError(response);
+			};
+				});
+		};
+		const form = document.getElementById("login-form");
+		form.addEventListener("submit", (event) => {
+			event.preventDefault();
+			
+			loginSubmit();
+		} 
+		);
+	});
+	</script>
+</body>
+</html>

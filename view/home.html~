@@ -1,0 +1,12 @@
+@(define recent-eps (pod-profile-recent-episodes a-profile))
+<div class="functions">
+	<a href="@(url-generator subscribe)">Subscribe to an RSS feed</a>
+	<a href="@(url-generator import-opml)">Import an OPML file</a>
+</div>
+<div class"recent-eps">
+	@in[ep recent-eps]{
+	<div class="episode">
+	<a href="@(url-generator episode-page (pod-episode-id ep))">@(pod-episode-title ep)</a>
+	</div>
+	}
+</div>

@@ -1,0 +1,6 @@
+@(define elems (formlet-display join-formlet))
+<form id="join-form">
+	@(string-join (map xexpr->string elems) "\n")
+	<input type="submit" />
+</form>
+<script type="text/javascript" src="js/join.js" ></script>
