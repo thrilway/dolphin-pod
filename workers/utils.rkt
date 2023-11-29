@@ -3,6 +3,8 @@
          (prefix-in m: net/mime)
          (prefix-in g: gregor)
          racket/vector
+         racket/date
+         db/util/datetime
          db)
 
 ;Convert a string to a url safely
@@ -20,8 +22,8 @@
       (let ((start-url (string->url url-string)))
         (struct-copy url start-url (user user-str)))))
 ;resolve a feed url or return false
-(define/contract (resolve-feed-url-or-fail feed-url (seen-urls '()))
-  (->* (url?) ((listof url?)) (or/c string? url?))
+(define/contract (resolve-feed-url-or-fail feed-url (last-check 0) (seen-urls '()))
+  (->* (url?) (integer? (listof url?)) (or/c string? url?))
   (define/contract (feed-mime? hdr-string)
     (-> string? boolean?)
     (define feed-types '(text application))
@@ -36,6 +38,15 @@
     (let* ((code-line (car (string-split header-string "\r\n")))
            (m (regexp-match #px"^HTTP/1.1 (\\d*) .*$" code-line)))
       (string->number (second m) 10)))
+  (define/contract (last-modified header-string)
+    (-> string? integer?)
+    (let loop ((fields (m:message-fields (call-with-input-string header-string m:mime-analyze))))
+      (if (null? fields)
+          0
+          (let ((m (regexp-match #px"(?i:^last-modified:\\s*(\\S*)\\s*$)" (car fields))))
+            (if m
+                (rfc2822->seconds (second m))
+                (loop (cdr fields)))))))
   (define/contract (extract-location header-string)
     (-> string? (or/c url? #f))
     (let loop ((fields (m:message-fields (call-with-input-string header-string m:mime-analyze))))
@@ -54,15 +65,16 @@
           (cond ((and
                   (< code 300)
                   (>= code 200))
-                 (if (feed-mime? headers)
-                     feed-url
-                     "Not a feed"))
+                 (cond ((not (feed-mime? headers)) "Not a feed")
+                       ((< (last-modified headers) last-check) "Unchanged")
+                       (else feed-url)))
+                ((= code 302) "Unchanged")
                 ((and
                   (< code 400)
                   (>= code 300))
                  (let ((next-url (extract-location headers)))
                    (if next-url
-                       (resolve-feed-url-or-fail next-url (cons feed-url seen-urls))
+                       (resolve-feed-url-or-fail next-url last-check (cons feed-url seen-urls))
                        "Bad Redirect")))
                 (else "Not Found"))))))
 
@@ -141,8 +153,39 @@
               (second (string->number (list-ref m 7)))
               (zone (parse-zone (list-ref m 8))))
           (sql-timestamp year month day hour minute second 0 zone))
-        (raise-user-error 'time-parsing "Could not parse ~s." datetime/string))))  
-(provide string->url/safe resolve-feed-url-or-fail clean-xml rfc2822->sql-timestampz)
+        (raise-user-error 'time-parsing "Could not parse ~s." datetime/string))))
+(define/contract (sql-timestampz->date* tsz)
+  (-> (or/c sql-null? sql-timestamp?) date*?)
+  (if (sql-null? tsz)
+      (seconds->date 0 #f)
+      (sql-datetime->srfi-date tsz)))
+(define/contract (sql-timestampz->seconds tsz)
+  (-> (or/c sql-null? sql-timestamp?) integer?)
+  (if (sql-null? tsz)
+      0
+      (date*->seconds (sql-datetime->srfi-date tsz))))
+(define/contract (rfc2822->date* date/string)
+  (-> string? date*?)
+  (sql-timestampz->date* (rfc2822->sql-timestampz date/string)))
+(define/contract (rfc2822->seconds date/string)
+  (-> string? integer?)
+  (date*->seconds (rfc2822->date* date/string)))
+(define/contract (seconds->rfc2822 s)
+  (-> integer? string?)
+  (date-display-format 'rfc2822)
+  (let ((str (date->string (seconds->date s #f) #t)))
+    (string-replace str "+0000" "GMT")))
+  
+(provide string->url/safe
+         resolve-feed-url-or-fail
+         clean-xml
+         rfc2822->sql-timestampz
+         rfc2822->date*
+         rfc2822->seconds
+         sql-timestampz->seconds
+         sql-timestampz->date*
+         seconds->rfc2822
+         )
 (module+ test
   (require rackunit)
   (check-equal? (sql-timestamp 2021 1 25 20 0 0 0 0)

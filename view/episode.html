@@ -1,4 +1,12 @@
-<h2>@(pod-episode-title an-episode)</h2>
-<div class="episode-description">
-	@(pod-episode-description an-episode)
-</div>
+<div class="episode">
+	<table>
+		<tr>
+			<td><img src="@(pod-episode-image-url an-episode)" class="epidose-cover-art" /></td>
+			<td><span class=><a href="@(pod-episode-url an-episode)">@(pod-episode-title an-episode)</a></span></td>
+		</tr>
+		<tr>
+			<td></td>
+			<td><div class="episode-description">@(pod-episode-description an-episode)</div></td>
+		</tr>
+	</table>
+<div>

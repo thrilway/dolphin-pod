@@ -1,0 +1,30 @@
+<script>
+	var profileObj = {
+		"username": "@(pod-profile-username a-profile)",
+		"name": "@(pod-profile-name a-profile)",
+		"description": "@(pod-profile-description a-profile)",
+		"iconUrl": "@(url-generator get-image (pod-profile-icon-id a-profile))",
+		"imageUrl": "@(url-generator get-image (pod-profile-image-id a-profile))",
+		"manualApprove?": @(if (pod-profile-manually-approves? a-profile) "true" "false")
+	};
+	window.addEventListener("load", (event) => {
+		if ( profileObj["name"] != null ) {
+			const name-input = document.getElementById("name");
+			name-input.setAttribute("value", profileObj["name"]);
+		};
+		if ( profileObj["description"] != null ) {
+			const description-input = document.getElementById("description");
+			name-input.setAttribute("value", profileObj["description"]);
+		};
+		if ( profileObj["iconUrl"] != null ) {
+			const currentIcon = document.getElementById("currentIcon");
+			currentIcon.setAttribute("src", profileObj["iconUrl"]);
+		};
+		if ( profileObj["imageUrl"] != null ) {
+			const currentImage = document.getElementById("currentImage");
+			currentImage.setAttribute("src", profileObj["imageUrl"]);
+		};
+		const manual = document.getElementById("currentImage");
+		manual.setAttribute("checked", profileObj["manualApprove?"]);
+	});
+</script>

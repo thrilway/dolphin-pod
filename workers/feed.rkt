@@ -2,25 +2,23 @@
 (require
   (prefix-in x: xml)
   net/url
-  srfi/19
   "utils.rkt")
 
-(define/contract (get-podcast-info feed-url)
-  (-> url? (or/c hash? string?))
+(define/contract (get-podcast-info feed-url #:last-check (last-check 0))
+  (->* (url?) (#:last-check integer?) (or/c hash? string?))
   (define/contract (time-str->secs time-str)
     (-> string? number?)
     (let loop ((rem (reverse (map string->number (string-split time-str ":")))) (acc 0))
       (if (null? rem)
           acc
           (loop (map (lambda (x) (* 60 x)) (cdr rem)) (+ acc (car rem))))))
-  (let ((feed-url-or-msg (resolve-feed-url-or-fail feed-url)))
+  (let ((feed-url-or-msg (resolve-feed-url-or-fail feed-url last-check)))
     (if (url? feed-url-or-msg)
         (let ((feed-xexpr (x:string->xexpr (port->string (get-pure-port feed-url-or-msg)))))
           (hash-set (parse-feed feed-xexpr)
                     'feed_url
                     (url->string feed-url-or-msg)))
         feed-url-or-msg)))
-                  
 
 (define/contract (parse-feed feed-xexpr)
   (-> x:xexpr? hash?)
@@ -64,7 +62,7 @@
     ((list 'itunes:explicit _ (pregexp #px"^(?i:false|no|clean)$"))
      (list (cons 'explicit #F)))
     ((list 'itunes:image (list (list attr-names attr-vals) ...) )
-     (list (cons 'cover_art_url (cdr (assoc 'href (map cons attr-names attr-vals))))))
+     (list (cons 'cover-art-url (cdr (assoc 'href (map cons attr-names attr-vals))))))
     ((list 'image _ content ...)
      (parse-image-tag feed-xexpr))
     (_ '())))
@@ -123,6 +121,8 @@
        (list (cons 'url (cdr (or (assoc 'href attrs)
                                  (assoc 'url attrs))))
              (cons 'file_mimetype (cdr (assoc 'type attrs))))))
+     ((list 'itunes:image (list (list attr-names attr-vals) ...))
+      (list (cons 'cover-art-url (cdr (assoc 'href (map cons attr-names attr-vals))))))
      (_ (list))))
 
 (define/contract (parse-text an-xexpr)
@@ -143,7 +143,7 @@
     ((list 'image _ content ...)
      (apply append (map parse-image-tag content)))
     ((list 'url _ content ...)
-     (list (cons 'cover_art_url (apply string-append (map parse-text content)))))
+     (list (cons 'cover-art-url (apply string-append (map parse-text content)))))
     (_ '())))
 
 (provide get-podcast-info)

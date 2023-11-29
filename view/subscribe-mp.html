@@ -1,5 +1,5 @@
 <form id="subscribe-form">
-	@(xexpr->string (car (formlet-display subscribe-formlet)))
+	@(xexpr->string (car (formlet-display subscribe-formlet/multipart)))
 	<input type="submit" />
 </form>
 <script type="text/javascript" >
@@ -7,13 +7,10 @@
 		function feedSubmit () {
 			const FD = new FormData(form);
 			const qstr = new URLSearchParams(FD).toString();
-			fetch("subscribe", {
+			fetch("subscribe-multipart", {
 				method: "POST",
-				headers: {
-					"Content-Type": "application/x-www-form-urlencoded",
-				 },
-				 referrer: "@redir-uri",
-				 body: qstr,
+				referrer: "@redir-uri",
+				body: FD,
 			}
 			).then((response) => {
 				if (response.redirected) {
@@ -27,15 +24,10 @@
 		};
 		function subscribeError (resp) {
 			const feedUrlDiv = document.querySelector("#feedUrlDiv");
-			if ( feedUrlDiv.getElementById("errorMsg") === null ) {
-				const errorMsg = feedUrlDiv.getElementById("errorMsg");
-				errorMsg.textContent = "Something went wrong!";
-			} else {
-				const errorMsg = feedUrlDiv.insertAdjacentElement("afterend", document.createElement("span", ));
-				errorMsg.setAttribute("id", "errorMsg");
-				errorMsg.textContent = "Something went wrong!";
-
-			}
+			const errorMsg = document.createElement("span");
+			errorMsg.setAttribute("class", "errorMsg");
+			errorMsg.textContent = "Something went wrong!";
+			feedUrlDiv.appendChild(errorMsg);
 			return;
 		};
 		const form = document.getElementById("subscribe-form");

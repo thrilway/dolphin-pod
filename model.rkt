@@ -5,6 +5,7 @@
   db/util/datetime  
   net/url
   "workers.rkt"
+  "workers/utils.rkt"
   racket/match
   racket/date
   dotenv)
@@ -66,6 +67,7 @@
 (struct/contract pod-profile ((pod pod?) (id number?)))
 (struct/contract pod-review ((pod pod?) (id number?)))
 (struct/contract pod-comment ((pod pod?) (id integer?)))
+(struct/contract pod-image ((pod pod?) (id integer?)))
 ;The Pod
 (define/contract (init-pod!)
   (-> pod?)
@@ -73,6 +75,7 @@
     (virtual-connection
      (connection-pool connect!)))
   (define the-pod (pod db))
+  (query-exec db "CREATE EXTENSION IF NOT EXISTS pgcrypto")
   (unless (table-exists? (pod-db the-pod) "users")
     (init-pod-users! the-pod))
   (unless (table-exists? (pod-db the-pod) "podcasts")
@@ -95,6 +98,7 @@
     (init-pod-shares! the-pod))
   (unless (table-exists? (pod-db the-pod) "tag_entity_rels")
     (init-pod-tag-entity-rels! the-pod))
+  (pod-update-podcasts! the-pod)
   the-pod)
 
 
@@ -234,7 +238,8 @@
                "author_id integer REFERENCES podcast_authors (id) ON DELETE CASCADE, "
                "explicit boolean, "
                "description text, "
-               "image_url text)")))
+               "image_url text, "
+               "last_checked timestamp with time zone)")))
 (define/contract (pod-insert-podcast! a-pod feed-url)
   (-> pod? url? pod-podcast?)
   (let ((id-or-false (query-maybe-value (pod-db a-pod)
@@ -256,15 +261,16 @@
                   (query-exec (pod-db a-pod)
                               (string-append
                                "INSERT INTO podcasts "
-                               "(id, feed_url, title, author_id, explicit, description, image_url) VALUES "
-                               "($1, $2, $3, $4, $5, $6, $7)")
+                               "(id, feed_url, title, author_id, explicit, description, image_url, last_checked) VALUES "
+                               "($1, $2, $3, $4, $5, $6, $7, to_timestamp($8))")
                             pid
                             (hash-ref podcast-info 'feed_url)
                             (hash-ref podcast-info 'title)
                             (if author (pod-author-id author) sql-null)
                             (hash-ref podcast-info 'explicit sql-null)
                             (hash-ref podcast-info 'description sql-null)
-                            (hash-ref podcast-info 'image-url sql-null))
+                            (hash-ref podcast-info 'cover-art-url sql-null)
+                            (current-seconds))
                 (for ((tag (hash-ref podcast-info 'tags '())))
                   (let ((the-tag (pod-insert-tag! a-pod tag)))
                     (pod-insert-tag-entity-rel! a-pod
@@ -275,7 +281,39 @@
                       (printf "\nfeed-url: ~a\n~a\n" (hash-ref podcast-info 'feed_url) episode)
                       (pod-insert-episode! a-pod the-podcast episode)))
                 the-podcast)))))))
-                    
+(define/contract (pod-update-podcasts! a-pod)
+  (-> pod? void?)
+  (define pids (query-list (pod-db a-pod)
+                           "SELECT id FROM podcasts"))
+  (for ((pid pids))
+    (pod-update-podcast! (pod-podcast a-pod pid))))
+(define/contract (pod-update-podcast! a-podcast)
+  (-> pod-podcast? void?)
+  (let* ((feed-url (string->url (query-value (pod-db (pod-podcast-pod a-podcast)) "SELECT feed_url FROM podcasts WHERE id = $1" (pod-podcast-id a-podcast))))
+         (last-checked (sql-timestampz->seconds
+                        (query-value (pod-db (pod-podcast-pod a-podcast)) "SELECT last_checked FROM podcasts WHERE id = $1" (pod-podcast-id a-podcast))))
+         (info-or-message (get-podcast-info feed-url #:last-check last-checked)))
+    (if (string? info-or-message)
+        (query-exec (pod-db (pod-podcast-pod a-podcast))
+                    "UPDATE podcasts SET last_checked = to_timestamp($1) WHERE id = $2"
+                    (current-seconds)
+                    (pod-podcast-id a-podcast))
+        (begin
+          (query-exec (pod-db (pod-podcast-pod a-podcast))
+                      (string-append
+                       "UPDATE podcasts SET"
+                       "(feed_url, title, explicit, description, image_url, last_checked) = "
+                       "($2, $3, $4, $5, $6, to_timestamp($7)) "
+                       "WHERE id = $1")
+                      (pod-podcast-id a-podcast)
+                      (hash-ref info-or-message 'feed_url)
+                      (hash-ref info-or-message 'title)
+                      (hash-ref info-or-message 'explicit sql-null)
+                      (hash-ref info-or-message 'description sql-null)
+                      (hash-ref info-or-message 'cover-art-url sql-null)
+                      (current-seconds))
+          (pod-update-episodes a-podcast (hash-ref info-or-message 'episodes))))))
+    
 (define/contract (pod-podcast-feed-url a-podcast)
   (-> pod-podcast? url?)
   (string->url
@@ -348,14 +386,15 @@
                "CREATE TABLE episodes ("
                "id bigint PRIMARY KEY REFERENCES entities (id) ON DELETE CASCADE, "
                "podcast_id integer NOT NULL REFERENCES podcasts (id) ON DELETE CASCADE, "
-               "file_url text NOT NULL UNIQUE, "
+               "file_url text NOT NULL, "
                "file_mimetype text NOT NULL, "
                "title text, "
                "description text, "
                "duration integer, "
                "image_url text, "
                "image_mimetype text, "
-               "date_posted timestamp with time zone)")))
+               "date_posted timestamp with time zone, "
+               "CONSTRAINT podcast_file_url_unique UNIQUE (podcast_id, file_url))")))
 (define/contract (pod-insert-episode! a-pod a-podcast episode-info)
   (->* (pod? pod-podcast? hash?) pod-episode?)
   (let ((the-ep (pod-episode a-pod (query-value (pod-db a-pod) "INSERT INTO entities (type) VALUES ('episode') RETURNING id"))))
@@ -368,7 +407,8 @@
       (query-exec (pod-db a-pod)
                   (string-append
                    "INSERT INTO episodes VALUES "
-                   "($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)")
+                   "($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) "
+                   "ON CONFLICT (podcast_id, file_url) DO NOTHING")
                   (pod-episode-id the-ep)
                   (pod-podcast-id a-podcast)
                   (hash-ref episode-info 'url)
@@ -383,6 +423,29 @@
       (let ((tag (pod-insert-tag! a-pod tag)))
         (pod-insert-tag-entity-rel! a-pod tag the-ep)))
     the-ep))
+(define/contract (pod-update-episodes a-podcast episode-info-list)
+  (-> pod-podcast? (listof hash?) void?)
+  (for ((info episode-info-list))
+    (let ((id-or-false (query-maybe-value (pod-db (pod-podcast-pod a-podcast))
+                                           "SELECT id FROM episodes WHERE file_url = $1"
+                                           (hash-ref info 'url))))
+      (if id-or-false
+          (query-exec (pod-db (pod-podcast-pod a-podcast))
+                      (string-append
+                       "UPDATE episodes SET"
+                        "(title, description, duration, image_url, image_mimetype, date_posted) "
+                        "= "
+                        "($1, $2, $3, $4, $5, $6)")
+                      (hash-ref info 'title sql-null)
+                      (hash-ref info 'description sql-null)
+                      (hash-ref info 'duration sql-null)
+                      (hash-ref info 'image_url sql-null)
+                      (hash-ref info 'image_mimetype sql-null)
+                      (hash-ref info 'date_published sql-null))
+          (begin
+            (pod-insert-episode! (pod-podcast-pod a-podcast) a-podcast info)
+            (void))))))
+  
 (define/contract (pod-episode-exists? an-episode)
   (-> pod-episode? boolean?)
   (if (query-maybe-value (pod-db (pod-episode-pod an-episode))
@@ -392,51 +455,55 @@
       #f))
 (define/contract (pod-episode-url an-episode)
   (-> pod-episode? string?)
-  (query-value (pod-db (pod-podcast-pod an-episode))
+  (query-value (pod-db (pod-episode-pod an-episode))
                "SELECT file_url FROM episodes WHERE id = $1"
                (pod-episode-id an-episode)))
 (define/contract (pod-episode-file-mimetype an-episode)
   (-> pod-episode? string?)
-  (query-value (pod-db (pod-podcast-pod an-episode))
+  (query-value (pod-db (pod-episode-pod an-episode))
                "SELECT file_mimetype FROM episodes WHERE id = $1"
                (pod-episode-id an-episode)))
 (define/contract (pod-episode-title an-episode)
   (-> pod-episode? string?)
-  (query-value (pod-db (pod-podcast-pod an-episode))
+  (query-value (pod-db (pod-episode-pod an-episode))
                "SELECT title FROM episodes WHERE id = $1"
                (pod-episode-id an-episode)))
 (define/contract (pod-episode-description an-episode)
   (-> pod-episode? (or/c string? #f))
-  (query-maybe-value (pod-db (pod-podcast-pod an-episode))
+  (query-maybe-value (pod-db (pod-episode-pod an-episode))
                      "SELECT description FROM episodes WHERE id = $1"
                      (pod-episode-id an-episode)))
 (define/contract (pod-episode-image-url an-episode)
   (-> pod-episode? (or/c string? #f))
-  (or
-   (query-maybe-value (pod-db (pod-podcast-pod an-episode))
-                      "SELECT image_url FROM episodes WHERE id = $1"
-                      (pod-episode-id an-episode))
-   (let ((podcast-id (query-value (pod-db (pod-podcast-pod an-episode))
-                                  "SELECT podcast_id FROM episodes WHERE id = $1"
-                                  (pod-episode-id an-episode))))
-     (query-maybe-value (pod-db (pod-podcast-pod an-episode))
-                        "SELECT image_url FROM podcasts WHERE id = $1"
-                        podcast-id))))
+  (let ((url-or-null (query-maybe-value (pod-db (pod-episode-pod an-episode))
+                                        "SELECT image_url FROM episodes WHERE id = $1"
+                                        (pod-episode-id an-episode))))
+    (if (string? url-or-null)
+        url-or-null
+        (let* ((podcast-id (query-value (pod-db (pod-episode-pod an-episode))
+                                       "SELECT podcast_id FROM episodes WHERE id = $1"
+                                       (pod-episode-id an-episode)))
+              (podcast-image-url-or-not (query-maybe-value (pod-db (pod-episode-pod an-episode))
+                                                           "SELECT image_url FROM podcasts WHERE id = $1"
+                                                           podcast-id)))
+          (if (string? podcast-image-url-or-not)
+              podcast-image-url-or-not
+              #f)))))
 (define/contract (pod-episode-image-mimetype an-episode)
   (-> pod-episode? (or/c string? #f))
   (or
-   (query-maybe-value (pod-db (pod-podcast-pod an-episode))
+   (query-maybe-value (pod-db (pod-episode-pod an-episode))
                       "SELECT image_mimetype FROM episodes WHERE id = $1"
                       (pod-episode-id an-episode))
-   (let ((podcast-id (query-value (pod-db (pod-podcast-pod an-episode))
+   (let ((podcast-id (query-value (pod-db (pod-episode-pod an-episode))
                                   "SELECT podcast_id FROM episodes WHERE id = $1"
                                   (pod-episode-id an-episode))))
-     (query-maybe-value (pod-db (pod-podcast-pod an-episode))
+     (query-maybe-value (pod-db (pod-episode-pod an-episode))
                         "SELECT image_mimetype FROM podcasts WHERE id = $1"
                         podcast-id))))
 (define/contract (pod-episode-date-published an-episode)
   (-> pod-episode? integer?)
-  (sql-timestamp->seconds (query-value (pod-db (pod-podcast-pod an-episode))
+  (sql-timestamp->seconds (query-value (pod-db (pod-episode-pod an-episode))
                                        "SELECT date_posted FROM episodes WHERE id = $1"
                                        (pod-episode-id an-episode))))
 ;Images
@@ -448,7 +515,37 @@
                "id serial PRIMARY KEY, "
                "image bytea NOT NULL, "
                "mime_type varchar(50) NOT NULL)")))
-
+(define/contract (pod-insert-image! a-pod some-bytes a-mime)
+  (-> pod? bytes? string? pod-image?)
+  (let ((id (query-value (pod-db a-pod)
+                         (string-append
+                          "INSERT INTO images (image, mime_type) "
+                          "VALUES ($1, $2) "
+                          "RETURNING id")
+                         some-bytes
+                         a-mime)))
+    (pod-image a-pod id)))
+(define/contract (pod-get-image a-pod an-id)
+  (-> pod? integer? pod-image?)
+  (if (query-maybe-value (pod-db a-pod)
+                         "SELECT id FROM images WHERE id = $1"
+                         an-id)
+      (pod-image a-pod an-id)
+      #f))
+(define/contract (pod-image-bytes an-image)
+  (-> pod-image? (or/c #f bytes?))
+  (query-maybe-value (pod-db (pod-image-pod an-image))
+                     (string-append
+                      "SELECT image FROM images "
+                      "WHERE id = $1")
+                     (pod-image-id an-image)))
+(define/contract (pod-image-mimetype an-image)
+  (-> pod-image? (or/c #f string?))
+  (query-maybe-value (pod-db (pod-image-pod an-image))
+                     (string-append
+                      "SELECT mime_type FROM images "
+                      "WHERE id = $1")
+                     (pod-image-id an-image)))
 ;Users and Profiles
 (define/contract (init-pod-profiles! a-pod)
   (-> pod? void?)
@@ -551,6 +648,7 @@
     (if uid
         (pod-user a-pod uid)
         #f)))
+
 (define/contract (pod-user-email a-user)
   (-> pod-user? string?)
   (query-value (pod-db (pod-user-pod a-user))
@@ -562,11 +660,27 @@
                (query-value (pod-db (pod-user-pod a-user))
                             "SELECT profile_id FROM users WHERE id = $1"
                             (pod-user-id a-user))))
+(define/contract (pod-get-user/profile a-profile)
+  (-> pod-profile? (or/c #f pod-user?))
+  (let ((id-or-false (query-maybe-value (pod-db (pod-profile-pod a-profile))
+                                        "SELECT id FROM users WHERE profile_id = $1"
+                                        (pod-profile-id a-profile))))
+    (if id-or-false
+        (pod-user (pod-profile-pod a-profile) id-or-false)
+        id-or-false)))
 (define/contract (pod-profile-username a-profile)
   (-> pod-profile? string?)
   (query-value (pod-db (pod-profile-pod a-profile))
                "SELECT username FROM profiles WHERE id = $1"
                (pod-profile-id a-profile)))
+(define/contract (pod-get-profile/username a-pod username)
+  (-> pod? string? (or/c #f pod-profile?))
+  (let ((id-or-false (query-maybe-value (pod-db a-pod)
+                                        "SELECT id FROM profiles WHERE username = $1"
+                                        username)))
+    (if id-or-false
+        (pod-profile a-pod id-or-false)
+        id-or-false)))
 (define/contract (pod-profile-name a-profile)
   (-> pod-profile? (or/c #f string?))
   (query-maybe-value (pod-db (pod-profile-pod a-profile))
@@ -577,6 +691,14 @@
   (query-maybe-value (pod-db (pod-profile-pod a-profile))
                      "SELECT description FROM profiles WHERE id = $1"
                      (pod-profile-id a-profile)))
+(define/contract (pod-profile-icon-id a-profile)
+  (-> pod-profile? (or/c #f integer?))
+  (query-maybe-value (pod-db (pod-profile-pod a-profile))
+                     (string-append
+                      "SELECT icon_id FROM "
+                      "profiles WHERE id = $1")
+                     (pod-profile-id a-profile)))
+
 (define/contract (pod-profile-icon a-profile)
   (-> pod-profile? (or/c #f bytes?))
   (query-maybe-value (pod-db (pod-profile-pod a-profile))
@@ -594,6 +716,13 @@
                       "profiles JOIN images "
                       "ON profiles.icon_id = images.id "
                       "WHERE profiles.id = $1")
+                     (pod-profile-id a-profile)))
+(define/contract (pod-profile-image-id a-profile)
+  (-> pod-profile? (or/c #f integer?))
+  (query-maybe-value (pod-db (pod-profile-pod a-profile))
+                     (string-append
+                      "SELECT image_id FROM "
+                      "profiles WHERE id = $1")
                      (pod-profile-id a-profile)))
 (define/contract (pod-profile-image a-profile)
   (-> pod-profile? (or/c #f bytes?))
@@ -739,24 +868,18 @@
                "id serial PRIMARY KEY, "
                "podcast_id integer REFERENCES podcasts (id) ON DELETE CASCADE, "
                "profile_id integer REFERENCES profiles (id) ON DELETE CASCADE, "
-               "created_on timestamp with time zone DEFAULT CURRENT_TIMESTAMP)"
+               "created_on timestamp with time zone DEFAULT CURRENT_TIMESTAMP, "
+               "UNIQUE (podcast_id, profile_id))"
               )))
 (define/contract (pod-subscribe! a-profile a-podcast)
   (-> pod-profile? pod-podcast? void?)
-  (if (query-maybe-value (pod-db (pod-profile-pod a-profile))
-                         (string-append
-                          "SELECT id FROM subscriptions WHERE "
-                          "podcast_id = $1, "
-                          "profile_id = $2)")
-                         (pod-profile-id a-profile)
-                         (pod-podcast-id a-podcast))
-      (void)
-      (query-exec (pod-db (pod-profile-pod a-profile))
-                  (string-append
-                   "INSERT INTO subscriptions (podcast_id, profile_id) "
-                   "VALUES ($1, $2)")
-                  (pod-podcast-id a-podcast)
-                  (pod-profile-id a-profile))))
+  (query-exec (pod-db (pod-profile-pod a-profile))
+              (string-append
+               "INSERT INTO subscriptions (podcast_id, profile_id) "
+               "VALUES ($1, $2) "
+               "ON CONFLICT (podcast_id, profile_id) DO NOTHING")
+              (pod-podcast-id a-podcast)
+              (pod-profile-id a-profile)))
 (define/contract (pod-profile-subscriptions/by-latest-episode a-pod a-profile)
   (-> pod? pod-profile? (listof pod-podcast?))
   (let ((rows
@@ -804,7 +927,7 @@
                                 "LIMIT $2")
                                (pod-profile-id a-profile)
                                count))
-  (map (lambda (id) (pod-episode (pod-profile-pod) id)) ep-ids))
+  (map (lambda (id) (pod-episode (pod-profile-pod a-profile) id)) ep-ids))
        
 (define/contract (init-pod-stars! a-pod)
   (-> pod? void?)
@@ -836,9 +959,8 @@
 (module* main #f
   (require racket/port)
   (define the-pod (init-pod!))
-  (define feeds (import-opml (port->bytes (open-input-file "/home/dan/Downloads/PocketCasts.opml"))))
-  (for ((feed feeds))
-    (if (string? (cdr feed))
-        (void)
-        (pod-insert-podcast! the-pod (cdr feed))))
+  (define the-episode (pod-episode the-pod
+                                   (query-value (pod-db the-pod)
+                                                "SELECT id FROM episodes WHERE podcast_id = 1484 LIMIT 1")))
+  (pod-episode-image-url the-episode)
   )
